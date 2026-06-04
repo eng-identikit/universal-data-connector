@@ -8,7 +8,7 @@ const sourceConfigSchema = Joi.object({
   sources: Joi.array().items(
     Joi.object({
       id: Joi.string().required(),
-      type: Joi.string().valid('opcua', 'mqtt', 'http', 'modbus').required(),
+      type: Joi.string().valid('opcua', 'mqtt', 'http', 'modbus', 'i3x').required(),
       enabled: Joi.boolean().default(true),
       name: Joi.string().optional(),
       description: Joi.string().optional(),

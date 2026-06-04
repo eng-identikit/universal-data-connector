@@ -26,13 +26,14 @@ const SerialConnector = require('./SerialConnector');
 
 // Industry 4.0/5.0
 const AASConnector = require('./AASConnector');
+const I3XConnector = require('./I3XConnector');
 
 module.exports = {
   // IT/IoT
   OpcUaConnector,
   MqttConnector,
   HttpConnector,
-  
+
   // Industrial PLC
   ModbusConnector,
   S7Connector,
@@ -41,13 +42,14 @@ module.exports = {
   FinsTcpConnector,
   MelsecConnector,
   CIPConnector,
-  
+
   // Building Automation
   BACnetConnector,
-  
+
   // Serial
   SerialConnector,
-  
+
   // Industry 4.0/5.0
-  AASConnector
+  AASConnector,
+  I3XConnector
 };

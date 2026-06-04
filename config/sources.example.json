@@ -536,6 +536,55 @@
       }
     },
     {
+      "id": "i3x-demo",
+      "type": "i3x",
+      "enabled": false,
+      "name": "i3X Demo Server (CESMII)",
+      "description": "i3X Industrial Information Interoperability eXchange — polling mode against the public CESMII demo endpoint",
+      "config": {
+        "baseUrl": "https://api.i3x.dev/v1",
+        "mode": "polling",
+        "interval": 5000,
+        "timeout": 15000,
+        "elementIds": [],
+        "depth": 0,
+        "authentication": {
+          "type": "none"
+        }
+      },
+      "retryConfig": {
+        "enabled": true,
+        "maxRetries": 3,
+        "retryDelay": 5000
+      }
+    },
+    {
+      "id": "i3x-sse-example",
+      "type": "i3x",
+      "enabled": false,
+      "name": "i3X Server-Sent Events",
+      "description": "i3X connector in SSE subscription mode — receives live data pushes via Server-Sent Events",
+      "config": {
+        "baseUrl": "https://your-i3x-server/v1",
+        "mode": "sse",
+        "timeout": 15000,
+        "elementIds": [
+          "plant/area1/line1/temperature",
+          "plant/area1/line1/pressure"
+        ],
+        "depth": 0,
+        "authentication": {
+          "type": "bearer",
+          "token": "YOUR_TOKEN_HERE"
+        }
+      },
+      "retryConfig": {
+        "enabled": true,
+        "maxRetries": 5,
+        "retryDelay": 5000
+      }
+    },
+    {
       "id": "serial-ascii-example",
       "type": "serial",
       "enabled": false,

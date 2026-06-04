@@ -27,6 +27,7 @@ const connectorLoaders = {
   'rs485':                    () => require('./protocols/SerialConnector'),
   'aas':                      () => require('./protocols/AASConnector'),
   'asset-administration-shell': () => require('./protocols/AASConnector'),
+  'i3x':                      () => require('./protocols/I3XConnector'),
 };
 
 // Cache already-loaded classes to avoid repeated require() calls
