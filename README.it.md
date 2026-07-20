@@ -1,5 +1,7 @@
 # Universal Data Connector v2.0 - Nuova Architettura
 
+🇬🇧 [English version](./README.md)
+
 ## Panoramica
 
 Il progetto Universal Data Connector è stato completamente ristrutturato per fornire un sistema più semplice, flessibile e potente di raccolta e distribuzione dati da sorgenti industriali.

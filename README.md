@@ -1,14 +1,16 @@
-# Universal Data Connector v2.0 - Nuova Architettura
+# Universal Data Connector v2.0 - New Architecture
 
-## Panoramica
+🇮🇹 [Versione italiana](./README.it.md)
 
-Il progetto Universal Data Connector è stato completamente ristrutturato per fornire un sistema più semplice, flessibile e potente di raccolta e distribuzione dati da sorgenti industriali.
+## Overview
 
-## 🎯 Caratteristiche Principali
+The Universal Data Connector project has been completely restructured to provide a simpler, more flexible and more powerful system for collecting and distributing data from industrial sources.
 
-### 1. **Formato Dati Unificato**
+## 🎯 Key Features
 
-Tutte le sorgenti dati vengono mappate in un unico formato standardizzato:
+### 1. **Unified Data Format**
+
+All data sources are mapped into a single standardized format:
 
 ```json
 {
@@ -25,12 +27,12 @@ Tutte le sorgenti dati vengono mappate in un unico formato standardizzato:
     "timestamp": "2026-02-13T10:00:00.000Z",
     "source": "opcua|modbus|mqtt|http",
     "quality": "GOOD",
-    "...": "altri metadati specifici del protocollo"
+    "...": "other protocol-specific metadata"
   }
 }
 ```
 
-**Esempio pratico:**
+**Practical example:**
 ```json
 {
   "id": "opcua_cartif_server",
@@ -61,30 +63,30 @@ Tutte le sorgenti dati vengono mappate in un unico formato standardizzato:
 }
 ```
 
-### 2. **Discovery Automatica**
+### 2. **Automatic Discovery**
 
-Il sistema può scoprire automaticamente la struttura dei dispositivi e salvarla in `config/mapping.json`:
+The system can automatically discover the structure of devices and save it to `config/mapping.json`:
 
-- **Prima lettura**: Il mapper analizza i dati ricevuti e genera la configurazione
-- **Salvataggio automatico**: La struttura viene salvata in `mapping.json`
-- **Personalizzazione**: L'utente può modificare il file per:
-  - Rinominare measurements
-  - Aggiungere trasformazioni (scale, offset, formula)
-  - Specificare unità di misura
-  - Disabilitare measurements non necessari
+- **First read**: The mapper analyzes the received data and generates the configuration
+- **Automatic saving**: The structure is saved to `mapping.json`
+- **Customization**: The user can edit the file to:
+  - Rename measurements
+  - Add transformations (scale, offset, formula)
+  - Specify units of measurement
+  - Disable unneeded measurements
 
-**Processo:**
-1. Abilita discovery mode in `mapping.json`: `"discoveryMode": true`
-2. Avvia UDC e connettiti alle sorgenti
-3. Il sistema rileva automaticamente i dispositivi e crea le configurazioni
-4. Modifica `mapping.json` per personalizzare le regole di mapping
-5. Riavvia con `"discoveryMode": false` per usare la configurazione
+**Process:**
+1. Enable discovery mode in `mapping.json`: `"discoveryMode": true`
+2. Start UDC and connect to the sources
+3. The system automatically detects the devices and creates the configurations
+4. Edit `mapping.json` to customize the mapping rules
+5. Restart with `"discoveryMode": false` to use the configuration
 
 ### 3. **Multi-Transport**
 
-Supporto per tre layer di trasporto (configurabili in `mapping.json`):
+Support for three transport layers (configurable in `mapping.json`):
 
-#### **NATS** (Messaging veloce)
+#### **NATS** (Fast messaging)
 ```json
 "transport": {
   "nats": {
@@ -121,9 +123,9 @@ Supporto per tre layer di trasporto (configurabili in `mapping.json`):
 }
 ```
 
-### 4. **Formati di Output**
+### 4. **Output Formats**
 
-#### **JSON** (Standard, leggibile)
+#### **JSON** (Standard, human-readable)
 ```json
 {
   "id": "device-001",
@@ -138,7 +140,7 @@ Supporto per tre layer di trasporto (configurabili in `mapping.json`):
 }
 ```
 
-#### **TOON** (Time-Oriented Object Notation - Compatto)
+#### **TOON** (Time-Oriented Object Notation - Compact)
 ```json
 {
   "format": "TOON",
@@ -158,35 +160,35 @@ Supporto per tre layer di trasporto (configurabili in `mapping.json`):
 }
 ```
 
-## 📁 Struttura File Principali
+## 📁 Main File Structure
 
 ```
 universal-data-connector/
 ├── config/
-│   ├── mapping.json          # Configurazione dispositivi e transport
-│   ├── sources.json          # Configurazione sorgenti dati
-│   └── storage.json          # Configurazione storage (opzionale)
+│   ├── mapping.json          # Device and transport configuration
+│   ├── sources.json          # Data source configuration
+│   └── storage.json          # Storage configuration (optional)
 ├── src/
 │   ├── mappingTools/
-│   │   ├── MappingEngine.js      # Gestione mapping e discovery
-│   │   ├── UniversalDataModel.js # Modello dati unificato
-│   │   ├── BaseMapper.js         # Base per tutti i mapper
+│   │   ├── MappingEngine.js      # Mapping and discovery management
+│   │   ├── UniversalDataModel.js # Unified data model
+│   │   ├── BaseMapper.js         # Base for all mappers
 │   │   └── mappers/
-│   │       ├── OPCUAMapper.js    # Mapper OPC UA
-│   │       ├── ModbusMapper.js   # Mapper Modbus
-│   │       ├── MQTTMapper.js     # Mapper MQTT
-│   │       └── GenericMapper.js  # Mapper generico
+│   │       ├── OPCUAMapper.js    # OPC UA mapper
+│   │       ├── ModbusMapper.js   # Modbus mapper
+│   │       ├── MQTTMapper.js     # MQTT mapper
+│   │       └── GenericMapper.js  # Generic mapper
 │   ├── transport/
-│   │   ├── NatsTransport.js      # Transport NATS
-│   │   ├── MqttTransport.js      # Transport MQTT
-│   │   └── HttpPushTransport.js  # Transport HTTP Push
+│   │   ├── NatsTransport.js      # NATS transport
+│   │   ├── MqttTransport.js      # MQTT transport
+│   │   └── HttpPushTransport.js  # HTTP Push transport
 │   └── core/
-│       └── DataConnectorEngine.js # Engine principale
+│       └── DataConnectorEngine.js # Main engine
 ```
 
-## 🔧 Configurazione mapping.json
+## 🔧 mapping.json Configuration
 
-### Struttura Completa
+### Full Structure
 
 ```json
 {
@@ -208,7 +210,7 @@ universal-data-connector/
           "name": "Human Readable Name",
           "type": "float|int|bool|string",
           "unit": "°C|bar|rpm|%|...",
-          "description": "Descrizione della misura",
+          "description": "Description of the measurement",
           "sourcePath": "path.to.source.value",
           
           "transform": {
@@ -223,7 +225,7 @@ universal-data-connector/
       
       "metadata": {
         "endpoint": "...",
-        "...": "metadati specifici protocollo"
+        "...": "protocol-specific metadata"
       }
     }
   ],
@@ -247,44 +249,44 @@ universal-data-connector/
 }
 ```
 
-## 🚀 Workflow Completo
+## 🚀 Complete Workflow
 
-### 1. **Discovery Mode - Prima Configurazione**
+### 1. **Discovery Mode - Initial Configuration**
 
 ```bash
-# 1. Abilita discovery in mapping.json
+# 1. Enable discovery in mapping.json
 "discoveryMode": true
 
-# 2. Avvia UDC
+# 2. Start UDC
 npm start
 
-# 3. Il sistema scopre automaticamente i dispositivi
-# e genera la configurazione in mapping.json
+# 3. The system automatically discovers the devices
+# and generates the configuration in mapping.json
 ```
 
-### 2. **Personalizzazione**
+### 2. **Customization**
 
-Modifica `config/mapping.json` per:
-- Rinominare measurements
-- Aggiungere trasformazioni
-- Specificare unità di misura
-- Disabilitare measurements non necessari
+Edit `config/mapping.json` to:
+- Rename measurements
+- Add transformations
+- Specify units of measurement
+- Disable unneeded measurements
 
-### 3. **Produzione**
+### 3. **Production**
 
 ```bash
-# Disabilita discovery
+# Disable discovery
 "discoveryMode": false
 
-# Riavvia UDC
+# Restart UDC
 npm start
 
-# Il sistema usa la configurazione personalizzata
+# The system uses the customized configuration
 ```
 
-## 🔄 Esempi di Trasformazioni
+## 🔄 Transformation Examples
 
-### Scale e Offset
+### Scale and Offset
 ```json
 {
   "transform": {
@@ -294,9 +296,9 @@ npm start
   }
 }
 ```
-Risultato: `(value * 0.1) - 273.15`
+Result: `(value * 0.1) - 273.15`
 
-### Arrotondamento
+### Rounding
 ```json
 {
   "transform": {
@@ -306,7 +308,7 @@ Risultato: `(value * 0.1) - 273.15`
 }
 ```
 
-### Formula Custom
+### Custom Formula
 ```json
 {
   "transform": {
@@ -315,9 +317,9 @@ Risultato: `(value * 0.1) - 273.15`
   }
 }
 ```
-Esempio: Conversione Celsius → Fahrenheit
+Example: Celsius → Fahrenheit conversion
 
-### Mapping Valori
+### Value Mapping
 ```json
 {
   "transform": {
@@ -331,35 +333,35 @@ Esempio: Conversione Celsius → Fahrenheit
 }
 ```
 
-## 📊 Protocolli Supportati
+## 📊 Supported Protocols
 
-- **OPC UA** - OPCUAMapper con supporto nodeId, data types, quality
-- **Modbus** - ModbusMapper per holding, input, coil, discrete registers
-- **MQTT** - MQTTMapper con parsing JSON automatico
-- **HTTP** - GenericMapper per REST APIs
-- **Altri** - GenericMapper per qualsiasi protocollo
+- **OPC UA** - OPCUAMapper with support for nodeId, data types, quality
+- **Modbus** - ModbusMapper for holding, input, coil, discrete registers
+- **MQTT** - MQTTMapper with automatic JSON parsing
+- **HTTP** - GenericMapper for REST APIs
+- **Others** - GenericMapper for any protocol
 
-## 🎯 Vantaggi della Nuova Architettura
+## 🎯 Benefits of the New Architecture
 
-1. **Semplicità**: Un unico formato dati unificato
-2. **Flessibilità**: Discovery automatica + personalizzazione manuale
-3. **Scalabilità**: Multi-transport per diversi use cases
-4. **Manutenibilità**: Configurazione centralizzata in mapping.json
-5. **Estensibilità**: Facile aggiungere nuovi mapper e transport
+1. **Simplicity**: A single unified data format
+2. **Flexibility**: Automatic discovery + manual customization
+3. **Scalability**: Multi-transport for different use cases
+4. **Maintainability**: Centralized configuration in mapping.json
+5. **Extensibility**: Easy to add new mappers and transports
 
-## 📝 Note di Migrazione
+## 📝 Migration Notes
 
-Se stai migrando dalla versione precedente:
+If you are migrating from the previous version:
 
-1. Il vecchio formato entities/attributes è stato sostituito da devices/measurements
-2. Le relazioni (relationships) sono state rimosse per semplicità
-3. NGSI-LD export è stato semplificato
-4. Mapping configuration è ora in mapping.json invece di essere distribuita
+1. The old entities/attributes format has been replaced by devices/measurements
+2. Relationships have been removed for simplicity
+3. NGSI-LD export has been simplified
+4. Mapping configuration now lives in mapping.json instead of being spread across files
 
-## 🛠️ API Programmatica
+## 🛠️ Programmatic API
 
 ```javascript
-// Accesso diretto al MappingEngine
+// Direct access to the MappingEngine
 const { MappingEngine } = require('./src/mappingTools');
 
 const engine = new MappingEngine({
@@ -370,10 +372,10 @@ const engine = new MappingEngine({
 // Map data
 const device = await engine.mapData(sourceData, 'opcua', context);
 
-// Export in JSON
+// Export as JSON
 const jsonData = engine.exportData('json');
 
-// Export in TOON
+// Export as TOON
 const toonData = engine.exportData('toon');
 
 // Get discovered devices
@@ -383,7 +385,7 @@ const devices = engine.getDiscoveredDevices();
 const stats = engine.getStatistics();
 ```
 
-## 📖 Ulteriori Risorse
+## 📖 Further Resources
 
 - [API Documentation](./docs/API.md)
 - [Configuration Guide](./docs/Configuration.md)
