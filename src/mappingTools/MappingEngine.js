@@ -225,6 +225,34 @@ class MappingEngine {
   }
 
   /**
+   * Discover and persist the mapping configuration of a device the first time
+   * it is seen (per-source "autoMapping"), without enabling global discovery mode.
+   * @returns {Promise<Object|null>} The new configuration, or null if one already existed
+   */
+  async discoverDevice(sourceData, sourceType, context = {}) {
+    const mapper = this.getMapper(sourceType);
+    if (!mapper) return null;
+
+    const deviceId = mapper.extractDeviceId(sourceData, context);
+    if (this.mappingConfigs.has(deviceId)) return null;
+
+    this.pendingDiscoveries = this.pendingDiscoveries || new Set();
+    if (this.pendingDiscoveries.has(deviceId)) return null;
+    this.pendingDiscoveries.add(deviceId);
+
+    try {
+      const discoveryConfig = mapper.discover(sourceData, context);
+      this.mappingConfigs.set(deviceId, discoveryConfig);
+      this.mappingStats.discoveredDevices++;
+      await this.saveMappingConfig();
+      logger.info(`Auto-mapping: discovered device ${deviceId} with ${discoveryConfig.measurements.length} measurements`);
+      return discoveryConfig;
+    } finally {
+      this.pendingDiscoveries.delete(deviceId);
+    }
+  }
+
+  /**
    * Get device configuration
    * @param {string} deviceId - Device ID
    * @returns {Object|null} Device configuration

@@ -10,6 +10,7 @@ const DataConnectorEngine = require('./core/DataConnectorEngine');
 const apiRoutes = require('./api');
 const mappingRoutes = require('./api/routes/mapping');
 const configManager = require('./config/ConfigManager');
+const storageConfigManager = require('./config/StorageConfigManager');
 
 class UniversalDataConnector {
   constructor(storageConfig = null) {
@@ -31,8 +32,20 @@ class UniversalDataConnector {
       // Initialize configuration
       await configManager.initialize();
 
+      // Storage from config/storage.json unless explicitly passed to the constructor.
+      // If it is unreachable the data store runs in memory and retries in background.
+      let storageConfig = this.storageConfig;
+      if (!storageConfig) {
+        try {
+          await storageConfigManager.initialize();
+          storageConfig = storageConfigManager.getStorageConfig();
+        } catch (error) {
+          logger.error(`Invalid config/storage.json, using in-memory storage: ${error.message}`);
+        }
+      }
+
       // Initialize data connector engine
-      this.engine = new DataConnectorEngine(this.storageConfig);
+      this.engine = new DataConnectorEngine(storageConfig);
       await this.engine.initialize();
 
       // Initialize mapping routes with engine instance PRIMA di setup routes

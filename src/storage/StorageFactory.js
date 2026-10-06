@@ -22,7 +22,8 @@ class StorageFactory {
     try {
       if (!storageCache[key]) storageCache[key] = loader();
       const StorageAdapterClass = storageCache[key];
-      const adapter = new StorageAdapterClass(config);
+      // Adapters read their type from config.type (BaseStorageAdapter.validateConfig)
+      const adapter = new StorageAdapterClass({ ...(config || {}), type: key === 'timescale' ? 'timescaledb' : key });
       logger.debug(`Created ${type} storage adapter`);
       return adapter;
     } catch (error) {

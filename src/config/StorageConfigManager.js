@@ -3,54 +3,35 @@ const path = require('path');
 const Joi = require('joi');
 const logger = require('../utils/logger');
 
-// Schema per validazione configurazione storage
+/**
+ * StorageConfigManager - loads, validates and saves config/storage.json
+ *
+ * File format:
+ * {
+ *   "storage":      { "type": "timescaledb", "config": { ... } },   // active storage
+ *   "alternatives": { "redis": { "type": "redis", "config": { ... } } }   // optional presets
+ * }
+ *
+ * Supported types are the ones StorageFactory can instantiate: memory, redis, timescaledb.
+ */
+
+const TYPE_ALIASES = { timescale: 'timescaledb' };
+const SUPPORTED_TYPES = ['memory', 'redis', 'timescaledb'];
+
 const storageConfigSchema = Joi.object({
   storage: Joi.object({
-    type: Joi.string().valid('memory', 'postgresql', 'postgres', 'mariadb', 'mysql', 'mongodb', 'mongo', 'redis').required(),
-    config: Joi.object().required()
-  }).required()
+    type: Joi.string().required(),
+    config: Joi.object().default({})
+  }).required(),
+  alternatives: Joi.object().pattern(Joi.string(), Joi.object({
+    type: Joi.string().required(),
+    config: Joi.object().default({})
+  }).unknown(true)).optional()
 }).unknown(true);
 
-// Schema specifici per ogni tipo di storage
-const postgresConfigSchema = Joi.object({
-  host: Joi.string().required(),
-  port: Joi.number().integer().min(1).max(65535).default(5432),
-  database: Joi.string().required(),
-  user: Joi.string().required(),
-  password: Joi.string().allow('').required(),
-  tableName: Joi.string().default('sensor_data'),
-  maxConnections: Joi.number().integer().min(1).default(10),
-  idleTimeout: Joi.number().integer().min(1000).default(30000),
-  connectionTimeout: Joi.number().integer().min(1000).default(2000),
-  ssl: Joi.alternatives().try(Joi.boolean(), Joi.object()).default(false)
-});
-
-const mariadbConfigSchema = Joi.object({
-  host: Joi.string().required(),
-  port: Joi.number().integer().min(1).max(65535).default(3306),
-  database: Joi.string().required(),
-  user: Joi.string().required(),
-  password: Joi.string().allow('').required(),
-  tableName: Joi.string().default('sensor_data'),
-  maxConnections: Joi.number().integer().min(1).default(10),
-  connectionTimeout: Joi.number().integer().min(1000).default(60000),
-  queryTimeout: Joi.number().integer().min(1000).default(60000),
-  ssl: Joi.alternatives().try(Joi.boolean(), Joi.object()).default(false)
-});
-
-const mongodbConfigSchema = Joi.object({
-  url: Joi.string().optional(),
-  host: Joi.string().when('url', { is: Joi.exist(), then: Joi.optional(), otherwise: Joi.required() }),
-  port: Joi.number().integer().min(1).max(65535).default(27017),
-  database: Joi.string().required(),
-  user: Joi.string().allow('').optional(),
-  password: Joi.string().allow('').optional(),
-  collection: Joi.string().default('sensor_data'),
-  maxConnections: Joi.number().integer().min(1).default(10),
-  connectionTimeout: Joi.number().integer().min(1000).default(5000),
-  socketTimeout: Joi.number().integer().min(1000).default(45000),
-  options: Joi.object().default({})
-});
+const memoryConfigSchema = Joi.object({
+  maxDataPoints: Joi.number().integer().min(100).default(10000)
+}).rename('maxRecords', 'maxDataPoints', { ignoreUndefined: true, override: true }).unknown(true);
 
 const redisConfigSchema = Joi.object({
   url: Joi.string().optional(),
@@ -64,28 +45,86 @@ const redisConfigSchema = Joi.object({
   connectTimeout: Joi.number().integer().min(1000).default(10000),
   commandTimeout: Joi.number().integer().min(1000).default(5000),
   options: Joi.object().default({})
-});
+}).rename('db', 'database', { ignoreUndefined: true, override: true }).unknown(true);
 
-const memoryConfigSchema = Joi.object({
-  maxDataPoints: Joi.number().integer().min(100).default(10000)
-});
+const timescaleConfigSchema = Joi.object({
+  host: Joi.string().required(),
+  port: Joi.number().integer().min(1).max(65535).default(5432),
+  database: Joi.string().required(),
+  username: Joi.string().required(),
+  password: Joi.string().allow('').default(''),
+  table: Joi.string().pattern(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/).default('sensor_data'),
+  hypertable: Joi.boolean().default(true),
+  chunkTimeInterval: Joi.string().default('1 day'),
+  compression: Joi.boolean().default(false),
+  compressionAfter: Joi.string().default('7 days'),
+  retentionPolicy: Joi.string().allow(null).optional(),
+  options: Joi.object().default({})
+}).rename('user', 'username', { ignoreUndefined: true, override: true }).unknown(true);
+
+const SCHEMAS = {
+  memory: memoryConfigSchema,
+  redis: redisConfigSchema,
+  timescaledb: timescaleConfigSchema
+};
+
+// Human-readable descriptions for the UI
+const TYPE_INFO = {
+  memory: {
+    name: 'In-Memory Storage',
+    description: 'Fast temporary buffer in memory, lost on restart',
+    configSchema: {
+      maxDataPoints: { type: 'number', default: 10000, description: 'Maximum number of data points kept' }
+    }
+  },
+  redis: {
+    name: 'Redis',
+    description: 'Key-value store with TTL, survives restarts',
+    configSchema: {
+      host: { type: 'string', required: true, description: 'Redis host' },
+      port: { type: 'number', default: 6379, description: 'Redis port' },
+      password: { type: 'string', description: 'Redis password (optional)' },
+      database: { type: 'number', default: 0, description: 'Database number' },
+      keyPrefix: { type: 'string', default: 'udc:', description: 'Key prefix' },
+      ttl: { type: 'number', description: 'TTL in seconds (optional)' },
+      maxEntries: { type: 'number', default: 10000, description: 'Maximum entries kept' }
+    }
+  },
+  timescaledb: {
+    name: 'TimescaleDB',
+    description: 'PostgreSQL time-series database, used for history browsing',
+    configSchema: {
+      host: { type: 'string', required: true, description: 'Database host' },
+      port: { type: 'number', default: 5432, description: 'Database port' },
+      database: { type: 'string', required: true, description: 'Database name' },
+      username: { type: 'string', required: true, description: 'Database user' },
+      password: { type: 'string', description: 'Database password' },
+      table: { type: 'string', default: 'sensor_data', description: 'Hypertable name' },
+      compression: { type: 'boolean', default: false, description: 'Compress old chunks' },
+      compressionAfter: { type: 'string', default: '7 days', description: 'Compress chunks older than' },
+      retentionPolicy: { type: 'string', description: 'Drop data older than (e.g. "90 days")' }
+    }
+  }
+};
+
+function normalizeType(type) {
+  const t = String(type || '').toLowerCase();
+  return TYPE_ALIASES[t] || t;
+}
 
 class StorageConfigManager {
   constructor() {
     this.configPath = path.join(process.cwd(), 'config');
     this.storageConfigFile = path.join(this.configPath, 'storage.json');
     this.storageConfig = null;
+    this.alternatives = {};
     this.initialized = false;
   }
 
   async initialize() {
     try {
-      // Create config directory if it doesn't exist
       await this.ensureConfigDirectory();
-      
-      // Load or create default storage configuration
       await this.loadStorageConfig();
-      
       this.initialized = true;
       logger.info('Storage configuration manager initialized successfully');
     } catch (error) {
@@ -95,134 +134,99 @@ class StorageConfigManager {
   }
 
   async ensureConfigDirectory() {
-    try {
-      await fs.access(this.configPath);
-    } catch (error) {
-      await fs.mkdir(this.configPath, { recursive: true });
-      logger.info('Created config directory');
-    }
+    await fs.mkdir(this.configPath, { recursive: true });
   }
 
   async loadStorageConfig() {
+    let raw;
     try {
-      // Check if storage config file exists
-      await fs.access(this.storageConfigFile);
-      
-      // Read and parse the configuration
-      const configData = await fs.readFile(this.storageConfigFile, 'utf8');
-      const config = JSON.parse(configData);
-      
-      // Validate configuration
-      const { error, value } = this.validateStorageConfig(config);
-      if (error) {
-        throw new Error(`Invalid storage configuration: ${error.details[0].message}`);
-      }
-      
-      this.storageConfig = value.storage;
-      logger.info(`Loaded storage configuration: ${this.storageConfig.type}`);
-      
+      raw = await fs.readFile(this.storageConfigFile, 'utf8');
     } catch (error) {
       if (error.code === 'ENOENT') {
-        // File doesn't exist, create default configuration
         logger.info('Storage configuration file not found, creating default configuration');
         await this.createDefaultConfig();
-      } else {
-        throw error;
+        return;
       }
+      throw error;
     }
+
+    const parsed = JSON.parse(raw);
+    const { error, value } = storageConfigSchema.validate(parsed);
+    if (error) {
+      throw new Error(`Invalid storage configuration: ${error.details[0].message}`);
+    }
+
+    const normalized = this.normalize(value.storage.type, value.storage.config);
+    if (!normalized.valid) {
+      throw new Error(`Invalid storage configuration: ${normalized.errors[0].message}`);
+    }
+
+    this.storageConfig = { type: normalized.type, config: normalized.config };
+    this.alternatives = value.alternatives || {};
+    logger.info(`Loaded storage configuration: ${this.storageConfig.type}`);
   }
 
-  validateStorageConfig(config) {
-    // First validate the main structure
-    const { error: mainError, value: mainValue } = storageConfigSchema.validate(config);
-    if (mainError) {
-      return { error: mainError };
+  /**
+   * Validate a type/config pair and apply defaults/renames.
+   * @returns {{ valid: boolean, type?: string, config?: Object, errors?: Array }}
+   */
+  normalize(type, config = {}) {
+    const key = normalizeType(type);
+    const schema = SCHEMAS[key];
+    if (!schema) {
+      return {
+        valid: false,
+        errors: [{ field: 'type', message: `Unsupported storage type: ${type} (supported: ${SUPPORTED_TYPES.join(', ')})` }]
+      };
     }
 
-    // Then validate the specific storage type configuration
-    const storageType = mainValue.storage.type;
-    const storageConfig = mainValue.storage.config;
-    
-    let specificSchema;
-    switch (storageType.toLowerCase()) {
-      case 'postgresql':
-      case 'postgres':
-        specificSchema = postgresConfigSchema;
-        break;
-      case 'mariadb':
-      case 'mysql':
-        specificSchema = mariadbConfigSchema;
-        break;
-      case 'mongodb':
-      case 'mongo':
-        specificSchema = mongodbConfigSchema;
-        break;
-      case 'redis':
-        specificSchema = redisConfigSchema;
-        break;
-      case 'memory':
-        specificSchema = memoryConfigSchema;
-        break;
-      default:
-        return { error: new Error(`Unsupported storage type: ${storageType}`) };
+    const { error, value } = schema.validate(config || {}, { abortEarly: false });
+    if (error) {
+      return {
+        valid: false,
+        errors: error.details.map(detail => ({
+          field: detail.path.join('.'),
+          message: detail.message,
+          value: detail.context?.value
+        }))
+      };
     }
-
-    const { error: specificError, value: specificValue } = specificSchema.validate(storageConfig);
-    if (specificError) {
-      return { error: specificError };
-    }
-
-    return {
-      value: {
-        storage: {
-          type: storageType,
-          config: specificValue
-        }
-      }
-    };
+    return { valid: true, type: key, config: value };
   }
 
   async createDefaultConfig() {
-    const defaultConfig = {
-      storage: {
-        type: "memory",
-        config: {
-          maxDataPoints: 10000
-        }
-      }
-    };
-
-    await fs.writeFile(
-      this.storageConfigFile, 
-      JSON.stringify(defaultConfig, null, 2), 
-      'utf8'
-    );
-    
-    this.storageConfig = defaultConfig.storage;
+    this.storageConfig = { type: 'memory', config: { maxDataPoints: 10000 } };
+    this.alternatives = {};
+    await this.writeFile();
     logger.info('Created default storage configuration (memory)');
+  }
+
+  async writeFile() {
+    const content = { storage: this.storageConfig };
+    if (this.alternatives && Object.keys(this.alternatives).length) {
+      content.alternatives = this.alternatives;
+    }
+    await fs.writeFile(this.storageConfigFile, JSON.stringify(content, null, 2), 'utf8');
   }
 
   getStorageConfig() {
     return this.storageConfig;
   }
 
+  /**
+   * Save a new active storage configuration (alternatives are preserved).
+   */
   async updateStorageConfig(newConfig) {
-    // Validate the new configuration
-    const { error, value } = this.validateStorageConfig({ storage: newConfig });
-    if (error) {
-      throw new Error(`Invalid storage configuration: ${error.details[0].message}`);
+    const normalized = this.normalize(newConfig?.type, newConfig?.config);
+    if (!normalized.valid) {
+      throw new Error(`Invalid storage configuration (validation): ${normalized.errors.map(e => e.message).join('; ')}`);
     }
 
-    this.storageConfig = value.storage;
-    
-    // Save to file
-    const configToSave = { storage: this.storageConfig };
-    await fs.writeFile(
-      this.storageConfigFile, 
-      JSON.stringify(configToSave, null, 2), 
-      'utf8'
-    );
-    
+    this.storageConfig = { type: normalized.type, config: normalized.config };
+    // Keep the preset for this type in sync so switching back restores it
+    this.alternatives = { ...this.alternatives, [normalized.type]: { ...this.storageConfig } };
+    await this.writeFile();
+
     logger.info(`Updated storage configuration: ${this.storageConfig.type}`);
     return this.storageConfig;
   }
@@ -230,6 +234,7 @@ class StorageConfigManager {
   async reloadConfig() {
     logger.info('Reloading storage configuration...');
     await this.loadStorageConfig();
+    this.initialized = true;
     logger.info('Storage configuration reloaded successfully');
   }
 
@@ -238,208 +243,125 @@ class StorageConfigManager {
   }
 
   getSupportedStorageTypes() {
-    return ['memory', 'postgresql', 'postgres', 'mariadb', 'mysql', 'mongodb', 'mongo', 'redis'];
+    return [...SUPPORTED_TYPES];
+  }
+
+  getTypeInfo() {
+    return SUPPORTED_TYPES.map(type => ({ type, ...TYPE_INFO[type] }));
   }
 
   getConfigSchema(storageType) {
-    switch (storageType.toLowerCase()) {
-      case 'postgresql':
-      case 'postgres':
-        return postgresConfigSchema.describe();
-      case 'mariadb':
-      case 'mysql':
-        return mariadbConfigSchema.describe();
-      case 'mongodb':
-      case 'mongo':
-        return mongodbConfigSchema.describe();
-      case 'redis':
-        return redisConfigSchema.describe();
-      case 'memory':
-        return memoryConfigSchema.describe();
-      default:
-        throw new Error(`Unsupported storage type: ${storageType}`);
+    const schema = SCHEMAS[normalizeType(storageType)];
+    if (!schema) {
+      throw new Error(`Unsupported storage type: ${storageType}`);
     }
+    return schema.describe();
   }
 
   async getConfig() {
     if (!this.initialized) {
       await this.initialize();
     }
-    
-    try {
-      const configData = await fs.readFile(this.storageConfigFile, 'utf8');
-      const fullConfig = JSON.parse(configData);
-      return fullConfig;
-    } catch (error) {
-      logger.warn('Storage config file not found, returning current config');
-      return { storage: this.storageConfig };
-    }
+    return { storage: this.storageConfig, alternatives: this.alternatives };
   }
 
+  /**
+   * Non-destructive connection test: connect, health check, disconnect.
+   * (Never writes or clears data in the target storage.)
+   */
   async testConnection(type, config) {
     const startTime = Date.now();
-    
-    try {
-      const StorageFactory = require('../storage/StorageFactory');
-      const adapter = StorageFactory.createAdapter(type, config);
-      
-      // Test connection
-      await adapter.connect();
-      
-      // Test basic operations
-      const testData = {
-        id: 'test-connection',
-        sourceId: 'test',
-        timestamp: new Date(),
-        data: { test: true }
+    const normalized = this.normalize(type, config);
+    if (!normalized.valid) {
+      return {
+        success: false,
+        message: `Invalid configuration: ${normalized.errors.map(e => e.message).join('; ')}`,
+        responseTime: 0,
+        details: { errors: normalized.errors }
       };
-      
-      await adapter.store(testData);
-      const retrieved = await adapter.getLatest('test', 1);
-      await adapter.clear();
-      await adapter.disconnect();
-      
+    }
+
+    const StorageFactory = require('../storage/StorageFactory');
+    let adapter = null;
+    try {
+      adapter = StorageFactory.create(normalized.type, normalized.config);
+      await adapter.initialize();
+      await adapter.connect();
+      const health = await adapter.healthCheck();
       const responseTime = Date.now() - startTime;
-      
       return {
         success: true,
         message: 'Connection test successful',
         responseTime,
-        details: {
-          canConnect: true,
-          canStore: true,
-          canRetrieve: retrieved.length > 0,
-          canClear: true
-        }
+        details: { canConnect: true, health }
       };
-      
     } catch (error) {
-      const responseTime = Date.now() - startTime;
       return {
         success: false,
         message: `Connection test failed: ${error.message}`,
-        responseTime,
-        details: {
-          error: error.message,
-          stack: error.stack
-        }
+        responseTime: Date.now() - startTime,
+        details: { canConnect: false, error: error.message }
       };
+    } finally {
+      if (adapter) {
+        await Promise.resolve(adapter.disconnect()).catch(() => {});
+      }
     }
   }
 
-  async getStorageHealth() {
-    if (!this.storageConfig) {
+  /**
+   * Health of the storage the engine is actually using (live adapter, no new connection).
+   */
+  async getStorageHealth(engine) {
+    const lastCheck = new Date().toISOString();
+    const dataStore = engine?.dataStore;
+    if (!dataStore) {
       return {
-        type: 'unknown',
+        type: this.storageConfig?.type || 'unknown',
+        configuredType: this.storageConfig?.type || 'unknown',
         status: 'unavailable',
-        health: {
-          responsive: false,
-          error: 'Storage configuration not loaded',
-          lastCheck: new Date().toISOString()
-        },
+        connected: false,
+        health: { responsive: false, error: 'Engine not available', lastCheck },
         statistics: null,
-        lastCheck: new Date().toISOString()
+        lastCheck
       };
     }
+
+    const info = dataStore.getStorageInfo();
+    let health = null;
+    let statistics = null;
     try {
-      const StorageFactory = require('../storage/StorageFactory');
-      const adapter = StorageFactory.createAdapter(
-        this.storageConfig.type, 
-        this.storageConfig.config
-      );
-      
-      const startTime = Date.now();
-      await adapter.connect();
-      const stats = await adapter.getStatistics();
-      await adapter.disconnect();
-      const responseTime = Date.now() - startTime;
-      
-      return {
-        type: this.storageConfig?.type ?? 'unknown',
-        status: 'healthy',
-        health: {
-          responsive: true,
-          responseTime,
-          lastCheck: new Date().toISOString()
-        },
-        statistics: stats,
-        lastCheck: new Date().toISOString()
-      };
-      
+      if (dataStore.useExternalStorage && dataStore.storageAdapter) {
+        health = await dataStore.storageAdapter.healthCheck();
+        statistics = await dataStore.storageAdapter.getStats();
+      } else {
+        statistics = dataStore.getStats();
+      }
     } catch (error) {
-      return {
-        type: this.storageConfig?.type ?? 'unknown',
-        status: 'unhealthy',
-        health: {
-          responsive: false,
-          error: error.message,
-          lastCheck: new Date().toISOString()
-        },
-        statistics: null,
-        lastCheck: new Date().toISOString()
-      };
+      health = { status: 'unhealthy', error: error.message };
     }
+
+    const healthy = info.status === 'connected' && (!health || health.status !== 'unhealthy');
+    return {
+      type: info.type,
+      configuredType: info.configuredType,
+      status: info.status === 'fallback' ? 'fallback' : healthy ? 'healthy' : 'unhealthy',
+      connected: healthy,
+      fallback: info.fallback,
+      health: { responsive: healthy, ...(health || {}), lastCheck },
+      statistics,
+      lastCheck
+    };
   }
 
   async validateConfig(type, config) {
-    try {
-      let schema;
-      
-      switch (type.toLowerCase()) {
-        case 'postgresql':
-        case 'postgres':
-          schema = postgresConfigSchema;
-          break;
-        case 'mariadb':
-        case 'mysql':
-          schema = mariadbConfigSchema;
-          break;
-        case 'mongodb':
-        case 'mongo':
-          schema = mongodbConfigSchema;
-          break;
-        case 'redis':
-          schema = redisConfigSchema;
-          break;
-        case 'memory':
-          schema = memoryConfigSchema;
-          break;
-        default:
-          throw new Error(`Unsupported storage type: ${type}`);
-      }
-      
-      const { error, value } = schema.validate(config);
-      
-      if (error) {
-        return {
-          valid: false,
-          errors: error.details.map(detail => ({
-            field: detail.path.join('.'),
-            message: detail.message,
-            value: detail.context?.value
-          }))
-        };
-      }
-      
-      return {
-        valid: true,
-        config: value
-      };
-      
-    } catch (error) {
-      return {
-        valid: false,
-        errors: [{
-          field: 'type',
-          message: error.message,
-          value: type
-        }]
-      };
+    const normalized = this.normalize(type, config);
+    if (!normalized.valid) {
+      return { valid: false, errors: normalized.errors };
     }
+    return { valid: true, type: normalized.type, config: normalized.config };
   }
 }
 
-// Singleton instance
-const storageConfigManager = new StorageConfigManager();
-
-module.exports = storageConfigManager;
+module.exports = new StorageConfigManager();
+module.exports.StorageConfigManager = StorageConfigManager;

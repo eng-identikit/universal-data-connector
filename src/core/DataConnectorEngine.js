@@ -357,40 +357,54 @@ class DataConnectorEngine extends EventEmitter {
   }
 
   async reloadStorageConfiguration(newStorageConfig = null) {
+    const StorageConfigManager = require('../config/StorageConfigManager');
     try {
       logger.info('Reloading storage configuration...');
 
-      // Save new storage configuration if provided
+      // Without an explicit configuration, reload the one saved in config/storage.json
+      let storageConfig;
       if (newStorageConfig) {
-        const StorageConfigManager = require('../config/StorageConfigManager');
-        await StorageConfigManager.updateStorageConfig(newStorageConfig);
+        const normalized = StorageConfigManager.normalize(newStorageConfig.type, newStorageConfig.config);
+        if (!normalized.valid) {
+          throw new Error(`Invalid storage configuration (validation): ${normalized.errors.map(e => e.message).join('; ')}`);
+        }
+        storageConfig = { type: normalized.type, config: normalized.config };
+      } else {
+        await StorageConfigManager.reloadConfig();
+        storageConfig = StorageConfigManager.getStorageConfig();
+      }
+
+      // Connect the new storage first: if it fails, the current one stays active
+      const newDataStore = new DataStore(storageConfig, { fallbackToMemory: false });
+      await newDataStore.initialize();
+
+      // Persist only once the new storage is known to work
+      if (newStorageConfig) {
+        await StorageConfigManager.updateStorageConfig(storageConfig);
         logger.info('New storage configuration saved');
       }
 
-      // Backup current data if needed
-      const currentData = await this.dataStore.getLatest(10000);
-      logger.info(`Backing up ${currentData.length} data points`);
-
-      // Reinitialize data store with new configuration
-      this.dataStore = new DataStore(newStorageConfig);
-      await this.dataStore.initialize();
-
-      // Restore data if any
-      if (currentData.length > 0) {
-        logger.info(`Restoring ${currentData.length} data points to new storage`);
-        for (const dataPoint of currentData) {
-          await this.dataStore.store(dataPoint);
+      // Carry over the in-memory buffer (external storages already hold their data)
+      const oldDataStore = this.dataStore;
+      const buffered = oldDataStore && !oldDataStore.useExternalStorage ? oldDataStore.data.slice().reverse() : [];
+      if (buffered.length > 0) {
+        logger.info(`Restoring ${buffered.length} buffered data points to new storage`);
+        for (const dataPoint of buffered) {
+          await newDataStore.store(dataPoint);
         }
       }
 
-      this.emit('storageConfigurationReloaded', {
-        storageType: newStorageConfig?.type || 'memory'
-      });
+      this.dataStore = newDataStore;
+      if (oldDataStore) {
+        await oldDataStore.shutdown();
+      }
 
+      this.emit('storageConfigurationReloaded', { storageType: storageConfig?.type || 'memory' });
       logger.info('Storage configuration reloaded successfully');
       return {
         success: true,
-        storageType: newStorageConfig?.type || 'memory',
+        storageType: storageConfig?.type || 'memory',
+        restoredDataPoints: buffered.length,
         message: 'Storage configuration reloaded successfully'
       };
 
@@ -440,28 +454,24 @@ class DataConnectorEngine extends EventEmitter {
 
   async handleIncomingData(sourceId, data) {
     try {
-      // 📊 LOG 1: Dati grezzi ricevuti dalla sorgente
-      logger.info(`📥 DATI RICEVUTI da sorgente '${sourceId}':`);
-      logger.info(JSON.stringify(data, null, 2));
+      // 📊 LOG 1: Dati grezzi ricevuti dalla sorgente (debug: i connettori fieldbus campionano ogni 100ms)
+      logger.debug(`📥 DATI RICEVUTI da sorgente '${sourceId}': ${JSON.stringify(data)}`);
 
-      // Apply mapping transformations
-      const mappedData = await this.mappingEngine.applyMapping(sourceId, data);
+      // Map to Universal Data Model ({ id, type, measurements, metadata })
+      const sourceConfig = this.connectors.get(sourceId)?.config;
+      const sourceType = sourceConfig?.type || data.type || 'generic';
+      const context = { sourceId, sourceType };
+
+      // 🔥 AUTO-MAPPING: salva la configurazione del dispositivo la prima volta che viene visto
+      if (sourceConfig?.autoMapping) {
+        await this.mappingEngine.discoverDevice(data, sourceType, context);
+      }
+
+      const mappedData = await this.mappingEngine.mapData(data, sourceType, context);
 
       if (mappedData) {
         // 📊 LOG 2: Dati dopo il mapping
-        logger.info(`✅ DATI MAPPATI per sorgente '${sourceId}':`);
-        logger.info(JSON.stringify(mappedData, null, 2));
-
-        // 📊 LOG 3: Dettagli del mapping applicato
-        const mappingDetails = this.mappingEngine.getMappingForSource(sourceId);
-        if (mappingDetails) {
-          logger.info(`🔄 MAPPING APPLICATO per '${sourceId}':`);
-          logger.info(`   Target: ${mappingDetails.target.type}`);
-          logger.info(`   Regole: ${mappingDetails.mappings.length} mapping configurati`);
-          mappingDetails.mappings.forEach((mapping, idx) => {
-            logger.info(`   [${idx + 1}] ${mapping.sourceField} → ${mapping.targetField} (${mapping.transform || 'direct'})`);
-          });
-        }
+        logger.debug(`✅ DATI MAPPATI per sorgente '${sourceId}': ${mappedData.measurements?.length || 0} misure`);
 
         // Emit mapped data event
         this.emit('data', {
@@ -511,11 +521,6 @@ class DataConnectorEngine extends EventEmitter {
         return;
       }
 
-      // 🔥 AUTO-MAPPING: Crea automaticamente il mapping se non esiste
-      if (connectorInfo.config.autoMapping && !this.mappingEngine.getMapping(sourceId)) {
-        logger.info(`🔧 Creating automatic mapping for source '${sourceId}'...`);
-        this.createAutoMapping(sourceId, data, connectorInfo.config);
-      }
       /* // Enrich data with metadata
       const enrichedData = {
         sourceId,
@@ -799,117 +804,6 @@ class DataConnectorEngine extends EventEmitter {
     }
   }
 
-  createAutoMapping(sourceId, sampleData, sourceConfig) {
-    try {
-      const mappings = [];
-
-      // Analizza i dati ricevuti e crea mapping automatico
-      const analyzeData = (data, prefix = '') => {
-        for (const key in data) {
-          if (data.hasOwnProperty(key)) {
-            const value = data[key];
-            const fieldPath = prefix ? `${prefix}.${key}` : key;
-
-            if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-              // Ricorsione per oggetti nested
-              analyzeData(value, fieldPath);
-            } else {
-              // Crea mapping per questo campo
-              const targetField = fieldPath
-                .replace(/[^a-zA-Z0-9]/g, '_')
-                .toLowerCase()
-                .replace(/^_+|_+$/g, '');
-
-              mappings.push({
-                sourceField: fieldPath,
-                targetField: targetField,
-                transform: this.detectDataType(value)
-              });
-            }
-          }
-        }
-      };
-
-      analyzeData(sampleData);
-
-      // Crea la configurazione di mapping
-      const mappingConfig = {
-        sourceId: sourceId,
-        target: {
-          type: 'ngsi-ld',
-          entityType: sourceConfig.name.replace(/[^a-zA-Z0-9]/g, '')
-        },
-        includeMetadata: true,
-        mappings: mappings,
-        autoGenerated: true,
-        generatedAt: new Date().toISOString()
-      };
-
-      // Aggiungi il mapping al MappingEngine
-      this.mappingEngine.addMapping(mappingConfig);
-
-      // Salva il mapping su file
-      this.saveMappingToFile(mappingConfig);
-
-      logger.info(`✅ Auto-mapping created for '${sourceId}' with ${mappings.length} fields`);
-      logger.info(`📄 Mapping saved to config/mapping.json`);
-
-      // Stampa il mapping creato
-      console.log('\n' + '='.repeat(80));
-      console.log('🔧 AUTO-MAPPING CREATO:');
-      console.log('='.repeat(80));
-      console.log(JSON.stringify(mappingConfig, null, 2));
-      console.log('='.repeat(80) + '\n');
-
-    } catch (error) {
-      logger.error(`Error creating auto-mapping for '${sourceId}':`, error);
-    }
-  }
-
-  detectDataType(value) {
-    if (typeof value === 'boolean') return 'boolean';
-    if (typeof value === 'number') {
-      return Number.isInteger(value) ? 'number' : 'number';
-    }
-    if (typeof value === 'string') return 'string';
-    if (value instanceof Date) return 'string';
-    return 'string';
-  }
-
-  async saveMappingToFile(mappingConfig) {
-    try {
-      const fs = require('fs').promises;
-      const path = require('path');
-      const configPath = path.join(__dirname, '../../config/mapping.json');
-
-      let existingMappings = [];
-
-      // Leggi i mapping esistenti
-      try {
-        const content = await fs.readFile(configPath, 'utf8');
-        existingMappings = JSON.parse(content);
-      } catch (error) {
-        // File non esiste, usa array vuoto
-        logger.info('Creating new mapping.json file');
-      }
-
-      // Rimuovi eventuali mapping esistenti per lo stesso sourceId
-      existingMappings = existingMappings.filter(m => m.sourceId !== mappingConfig.sourceId);
-
-      // Aggiungi il nuovo mapping
-      existingMappings.push(mappingConfig);
-
-      // Salva su file
-      await fs.writeFile(configPath, JSON.stringify(existingMappings, null, 2), 'utf8');
-
-      logger.info(`✅ Mapping saved to ${configPath}`);
-
-    } catch (error) {
-      logger.error('Error saving mapping to file:', error);
-    }
-  }
-
-  // API Support Methods
   getConnectorStatus() {
     const status = {};
 
@@ -952,31 +846,22 @@ class DataConnectorEngine extends EventEmitter {
  * @param {number} limit - Maximum number of records
  * @returns {Array} Array of data records
  */
-  getLatestData(sourceId = null, limit = 100) {
+  /**
+   * Latest data points (newest first), from the active storage
+   * @param {string|null} sourceId - Optional source filter
+   * @param {number} limit - Maximum number of records
+   * @returns {Promise<Array>} Array of data records
+   */
+  async getLatestData(sourceId = null, limit = 100) {
     try {
       if (!this.dataStore) {
         logger.warn('DataStore not available');
         return [];
       }
-
-      // Get all data from store
-      const allData = this.dataStore.getAll ? this.dataStore.getAll() : [];
-
-      // Filter by source if specified
-      let filteredData = sourceId
-        ? allData.filter(d => d.sourceId === sourceId)
-        : allData;
-
-      // Sort by timestamp descending
-      filteredData.sort((a, b) => {
-        const timeA = new Date(a.timestamp || 0).getTime();
-        const timeB = new Date(b.timestamp || 0).getTime();
-        return timeB - timeA;
-      });
-
-      // Apply limit
-      return filteredData.slice(0, limit);
-
+      const data = sourceId
+        ? await this.dataStore.getBySource(sourceId, limit)
+        : await this.dataStore.getLatest(limit);
+      return Array.isArray(data) ? data : [];
     } catch (error) {
       logger.error('Error getting latest data:', error);
       return [];
@@ -987,7 +872,7 @@ class DataConnectorEngine extends EventEmitter {
    * Get data by source ID
    * @param {string} sourceId - Source ID
    * @param {number} limit - Maximum number of records
-   * @returns {Array} Array of data records
+   * @returns {Promise<Array>} Array of data records
    */
   getDataBySource(sourceId, limit = 100) {
     return this.getLatestData(sourceId, limit);
@@ -1083,6 +968,11 @@ class DataConnectorEngine extends EventEmitter {
       // Close NATS connection
       if (this.natsTransport) {
         await this.natsTransport.close();
+      }
+
+      // Close storage (flushes connections, stops retry timers)
+      if (this.dataStore) {
+        await this.dataStore.shutdown();
       }
 
       logger.info('Data Connector Engine stopped successfully');

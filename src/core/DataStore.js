@@ -1,11 +1,29 @@
 const logger = require('../utils/logger');
 const StorageFactory = require('../storage/StorageFactory');
 
+// Node network errors (e.g. AggregateError ECONNREFUSED) can have an empty message
+function describeError(error) {
+  if (!error) return 'unknown error';
+  if (error.message) return error.message;
+  if (error.code) return error.code;
+  if (Array.isArray(error.errors) && error.errors.length) return describeError(error.errors[0]);
+  return String(error);
+}
+
 class DataStore {
-  constructor(storageConfig = null) {
+  /**
+   * @param {Object|null} storageConfig - { type, config }
+   * @param {Object} options
+   * @param {boolean} options.fallbackToMemory - if the external storage is unreachable at
+   *   startup, keep running in memory and retry periodically (default true). When false,
+   *   initialize() throws (used when switching storage at runtime).
+   * @param {number} options.retryInterval - ms between reconnection attempts (default 30s)
+   */
+  constructor(storageConfig = null, options = {}) {
     // Legacy in-memory storage as fallback
     this.data = [];
-    this.maxDataPoints = parseInt(process.env.MAX_DATA_POINTS) || 10000;
+    this.maxDataPoints = (storageConfig?.type === 'memory' && storageConfig.config?.maxDataPoints) ||
+      parseInt(process.env.MAX_DATA_POINTS) || 10000;
     this.retentionDays = parseInt(process.env.DATA_RETENTION_DAYS) || 7;
     this.initialized = false;
     this.cleanupInterval = null;
@@ -16,22 +34,30 @@ class DataStore {
       config: {}
     };
     this.storageAdapter = null;
-    this.useExternalStorage = storageConfig && storageConfig.type !== 'memory';
+    this.useExternalStorage = false;
+    this.wantsExternalStorage = !!storageConfig && storageConfig.type !== 'memory';
+
+    this.fallbackToMemory = options.fallbackToMemory !== false;
+    this.retryInterval = options.retryInterval || parseInt(process.env.STORAGE_RETRY_INTERVAL) || 30000;
+    this.retryTimer = null;
+    this.fallback = null; // { reason, since } while running in memory instead of the configured storage
   }
 
   async initialize() {
     try {
-      // Initialize storage adapter if configured
-      if (this.useExternalStorage) {
-        this.storageAdapter = StorageFactory.create(
-          this.storageConfig.type, 
-          this.storageConfig.config
-        );
-        
-        await this.storageAdapter.initialize();
-        await this.storageAdapter.connect();
-        
-        logger.info(`Data store initialized with ${this.storageConfig.type} storage adapter`);
+      if (this.wantsExternalStorage) {
+        try {
+          await this.connectExternal();
+          logger.info(`Data store initialized with ${this.storageConfig.type} storage adapter`);
+        } catch (error) {
+          if (!this.fallbackToMemory) throw error;
+          this.fallback = { reason: describeError(error), since: new Date().toISOString() };
+          logger.error(
+            `${this.storageConfig.type} storage unavailable (${describeError(error)}): using in-memory storage, ` +
+            `retrying every ${Math.round(this.retryInterval / 1000)}s`
+          );
+          this.startRetry();
+        }
       } else {
         logger.info(`Data store initialized with in-memory storage (max ${this.maxDataPoints} data points, ${this.retentionDays} days retention)`);
       }
@@ -44,6 +70,78 @@ class DataStore {
       logger.error('Failed to initialize data store:', error);
       throw error;
     }
+  }
+
+  async connectExternal() {
+    const adapter = StorageFactory.create(this.storageConfig.type, this.storageConfig.config || {});
+    try {
+      await adapter.initialize();
+      await adapter.connect();
+    } catch (error) {
+      await Promise.resolve(adapter.disconnect && adapter.disconnect()).catch(() => {});
+      throw error;
+    }
+    this.storageAdapter = adapter;
+    this.useExternalStorage = true;
+  }
+
+  startRetry() {
+    if (this.retryTimer) return;
+    this.retryTimer = setInterval(() => this.retryExternal(), this.retryInterval);
+    if (this.retryTimer.unref) this.retryTimer.unref();
+  }
+
+  stopRetry() {
+    if (this.retryTimer) {
+      clearInterval(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  async retryExternal() {
+    if (this.retrying || this.useExternalStorage) return;
+    this.retrying = true;
+    try {
+      await this.connectExternal();
+      this.stopRetry();
+      const since = this.fallback?.since;
+      this.fallback = null;
+      logger.info(`${this.storageConfig.type} storage is now available, switched from in-memory storage`);
+
+      // Move the data buffered in memory during the outage to the external storage (oldest first)
+      const buffered = since ? this.data.filter(item => item.storedAt >= since).reverse() : [];
+      let flushed = 0;
+      for (const item of buffered) {
+        try {
+          await this.storageAdapter.store(item);
+          flushed++;
+        } catch (error) {
+          logger.warn(`Could not flush buffered data point to ${this.storageConfig.type}: ${error.message}`);
+          break;
+        }
+      }
+      if (flushed) {
+        logger.info(`Flushed ${flushed} buffered data points to ${this.storageConfig.type} storage`);
+        this.data = this.data.filter(item => !(item.storedAt >= since));
+      }
+    } catch (error) {
+      if (this.fallback) this.fallback.reason = describeError(error);
+      logger.debug(`${this.storageConfig.type} storage still unavailable: ${error.message}`);
+    } finally {
+      this.retrying = false;
+    }
+  }
+
+  getStorageInfo() {
+    return {
+      type: this.useExternalStorage ? this.storageConfig.type : 'memory',
+      configuredType: this.storageConfig.type,
+      status: this.fallback ? 'fallback' : 'connected',
+      connected: this.useExternalStorage ? this.storageAdapter?.isConnected !== false : true,
+      fallback: this.fallback,
+      retryInterval: this.fallback ? this.retryInterval : undefined,
+      bufferedDataPoints: this.data.length
+    };
   }
 
   store(data) {
@@ -156,6 +254,23 @@ class DataStore {
   }
 
   getBySourceAndTimeRange(sourceId, startTime, endTime) {
+    if (this.useExternalStorage && this.storageAdapter) {
+      const adapter = this.storageAdapter;
+      const request = typeof adapter.query === 'function'
+        ? adapter.query({ sourceId, startTime, endTime, limit: 10000 })
+        : adapter.getByTimeRange(startTime, endTime);
+      return request
+        .then(items => items.filter(item => item.sourceId === sourceId))
+        .catch(error => {
+          logger.error('Error getting data by source and time range from external storage:', error);
+          return this.getBySourceAndTimeRangeMemory(sourceId, startTime, endTime);
+        });
+    }
+
+    return this.getBySourceAndTimeRangeMemory(sourceId, startTime, endTime);
+  }
+
+  getBySourceAndTimeRangeMemory(sourceId, startTime, endTime) {
     const start = new Date(startTime);
     const end = new Date(endTime);
     
@@ -317,6 +432,7 @@ class DataStore {
 
   async shutdown() {
     this.stopCleanupRoutine();
+    this.stopRetry();
     
     if (this.storageAdapter) {
       try {

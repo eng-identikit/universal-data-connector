@@ -73,7 +73,7 @@ async function testStorage(storageType, config) {
     console.log('✓ Data stored successfully');
     
     // Test retrieve
-    const retrieved = await adapter.getLatest('test-source', 1);
+    const retrieved = await adapter.getBySource('test-source', 1);
     if (retrieved.length > 0) {
       console.log('✓ Data retrieved successfully');
       console.log(`  Retrieved record: ${retrieved[0].id}`);

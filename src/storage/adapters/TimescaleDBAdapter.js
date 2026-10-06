@@ -18,7 +18,7 @@ const logger = require('../../utils/logger');
  */
 class TimescaleDBAdapter extends BaseStorageAdapter {
   constructor(config) {
-    super('timescaledb', config);
+    super({ type: 'timescaledb', ...config });
     
     this.client = null;
     this.table = config.table || 'sensor_data';
@@ -55,6 +55,7 @@ class TimescaleDBAdapter extends BaseStorageAdapter {
       await this.initializeSchema();
       
       this.connected = true;
+      this.isConnected = true;
       logger.info(`Connected to TimescaleDB at ${this.config.host}:${this.config.port}`);
       
       return true;
@@ -69,6 +70,7 @@ class TimescaleDBAdapter extends BaseStorageAdapter {
       await this.client.end();
       this.client = null;
       this.connected = false;
+      this.isConnected = false;
       logger.info('Disconnected from TimescaleDB');
     }
   }
@@ -225,8 +227,8 @@ class TimescaleDBAdapter extends BaseStorageAdapter {
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-      const limit = query.limit || 100;
-      const offset = query.offset || 0;
+      const limit = Math.min(Math.max(parseInt(query.limit, 10) || 100, 1), 10000);
+      const offset = Math.max(parseInt(query.offset, 10) || 0, 0);
 
       const sql = `
         SELECT id, time, source_id, data_type, value, metadata, created_at
@@ -251,6 +253,54 @@ class TimescaleDBAdapter extends BaseStorageAdapter {
       logger.error('Failed to retrieve data from TimescaleDB:', error);
       throw error;
     }
+  }
+
+  // Standard read interface (BaseStorageAdapter) — returns data points in the
+  // same shape they were stored with: { id, sourceId, timestamp, data, ... }
+  toDataPoint(row) {
+    const value = row.value && typeof row.value === 'object' && !Array.isArray(row.value) ? row.value : { data: row.value };
+    return {
+      ...value,
+      id: String(row.id),
+      sourceId: value.sourceId || row.sourceId,
+      timestamp: row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp
+    };
+  }
+
+  async query(criteria = {}) {
+    const rows = await this.retrieve({
+      sourceId: criteria.sourceId,
+      startTime: criteria.startTime,
+      endTime: criteria.endTime,
+      limit: criteria.limit || 100,
+      offset: criteria.offset || 0
+    });
+    return rows.map(row => this.toDataPoint(row));
+  }
+
+  async getLatest(limit = 100) {
+    return this.query({ limit });
+  }
+
+  async getBySource(sourceId, limit = 100) {
+    return this.query({ sourceId, limit });
+  }
+
+  async getByTimeRange(startTime, endTime, limit = 10000) {
+    return this.query({ startTime, endTime, limit });
+  }
+
+  async search(text, limit = 100) {
+    if (!this.connected) {
+      throw new Error('Not connected to TimescaleDB');
+    }
+    const result = await this.client.query(
+      `SELECT id, time, source_id, value FROM ${this.table}
+       WHERE source_id ILIKE $1 OR value::text ILIKE $1
+       ORDER BY time DESC LIMIT $2`,
+      [`%${String(text).replace(/[\\%_]/g, '\\$&')}%`, Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000)]
+    );
+    return result.rows.map(row => this.toDataPoint({ id: row.id, timestamp: row.time, sourceId: row.source_id, value: row.value }));
   }
 
   async getStats() {
@@ -338,12 +388,16 @@ class TimescaleDBAdapter extends BaseStorageAdapter {
       }
 
       const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+      const fn = ['avg', 'min', 'max', 'sum', 'count'].includes(String(aggregateFunction).toLowerCase())
+        ? String(aggregateFunction).toLowerCase()
+        : 'avg';
+      values.push(bucket);
 
       const query = `
         SELECT 
-          time_bucket('${bucket}', time) AS bucket,
+          time_bucket($${paramCount}::interval, time) AS bucket,
           source_id,
-          ${aggregateFunction}((value->>'value')::float) AS aggregate_value,
+          ${fn}((value->>'value')::float) AS aggregate_value,
           COUNT(*) AS count
         FROM ${this.table}
         ${whereClause}

@@ -69,6 +69,9 @@ class RedisAdapter extends BaseStorageAdapter {
 
   async connect() {
     try {
+      if (!this.client) {
+        await this.initialize();
+      }
       // Test connection
       await this.client.ping();
       

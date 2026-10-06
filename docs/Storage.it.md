@@ -264,6 +264,13 @@ GET /api/config/storage/health
 GET /api/config/storage/types
 ```
 
+## Avvio, fallback e cambio a caldo
+
+- **Avvio:** il server legge `config/storage.json` (`storage`) e si connette allo storage configurato. I tipi supportati sono `memory`, `redis` e `timescaledb` (alias `timescale`). Alcuni campi vengono normalizzati: `user` → `username`, `db` → `database`, `maxRecords` → `maxDataPoints`.
+- **Fallback:** se lo storage non è raggiungibile, il server **parte comunque** e tiene i dati in memoria. Riprova a connettersi ogni 30 s (variabile `STORAGE_RETRY_INTERVAL`, in ms). Quando lo storage torna disponibile, ci trasferisce i dati accumulati. Lo stato è visibile nella pagina Archiviazione e in `GET /api/config/storage` (`runtime`).
+- **Cambio a caldo** (`POST /api/config/storage/configure` o pulsante *Applica e Ricarica*): il nuovo storage viene validato e connesso **prima** di sostituire quello attuale. Se fallisce, resta attivo il precedente e `storage.json` non viene modificato. Le `alternatives` presenti nel file vengono mantenute.
+- **Test connessione** (`POST /api/config/storage/test`): si connette, esegue un health check e si disconnette, **senza scrivere né cancellare dati**.
+
 ## Migrazione tra Storage
 
 ### 1. Backup dei dati correnti

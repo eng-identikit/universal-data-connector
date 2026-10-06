@@ -306,16 +306,18 @@ router.post('/sources/validate', (req, res) => {
 
 // === STORAGE CONFIGURATION ROUTES ===
 
-// Get current storage configuration
+// Get current storage configuration (saved) and the storage the engine is actually using
 router.get('/storage', async (req, res) => {
   try {
     const storageConfig = await storageConfigManager.getConfig();
-    
+    const engine = req.app.get('serverInstance')?.getEngine();
+
     res.json({
       timestamp: new Date().toISOString(),
       storage: {
         current: storageConfig.storage,
-        alternatives: storageConfig.alternatives || {}
+        alternatives: storageConfig.alternatives || {},
+        runtime: engine?.dataStore ? engine.dataStore.getStorageInfo() : null
       }
     });
 
@@ -346,9 +348,9 @@ router.put('/storage', async (req, res) => {
     
     res.json({
       timestamp: new Date().toISOString(),
-      message: 'Storage configuration updated successfully',
-      storage: updatedConfig.storage,
-      restartRequired: true
+      message: 'Storage configuration saved; use POST /api/config/storage/reload to apply it',
+      storage: updatedConfig,
+      restartRequired: false
     });
 
   } catch (error) {
@@ -371,66 +373,11 @@ router.put('/storage', async (req, res) => {
 // Get available storage types and their schemas
 router.get('/storage/types', (req, res) => {
   try {
-    const storageTypes = {
-      memory: {
-        name: 'In-Memory Storage',
-        description: 'Fast temporary storage in memory',
-        configSchema: {
-          maxRecords: { type: 'number', default: 10000, description: 'Maximum number of records to keep' },
-          ttl: { type: 'number', default: 3600000, description: 'Time to live in milliseconds' }
-        }
-      },
-      postgresql: {
-        name: 'PostgreSQL Database',
-        description: 'Relational database storage with PostgreSQL',
-        configSchema: {
-          host: { type: 'string', required: true, description: 'Database host' },
-          port: { type: 'number', default: 5432, description: 'Database port' },
-          database: { type: 'string', required: true, description: 'Database name' },
-          username: { type: 'string', required: true, description: 'Database username' },
-          password: { type: 'string', required: true, description: 'Database password' },
-          table: { type: 'string', default: 'sensor_data', description: 'Table name' },
-          schema: { type: 'string', default: 'public', description: 'Database schema' }
-        }
-      },
-      mariadb: {
-        name: 'MariaDB Database',
-        description: 'Relational database storage with MariaDB/MySQL',
-        configSchema: {
-          host: { type: 'string', required: true, description: 'Database host' },
-          port: { type: 'number', default: 3306, description: 'Database port' },
-          database: { type: 'string', required: true, description: 'Database name' },
-          username: { type: 'string', required: true, description: 'Database username' },
-          password: { type: 'string', required: true, description: 'Database password' },
-          table: { type: 'string', default: 'sensor_data', description: 'Table name' }
-        }
-      },
-      mongodb: {
-        name: 'MongoDB Database',
-        description: 'NoSQL document database storage',
-        configSchema: {
-          uri: { type: 'string', required: true, description: 'MongoDB connection URI' },
-          database: { type: 'string', required: true, description: 'Database name' },
-          collection: { type: 'string', default: 'sensor_data', description: 'Collection name' }
-        }
-      },
-      redis: {
-        name: 'Redis Cache',
-        description: 'High-performance key-value storage',
-        configSchema: {
-          host: { type: 'string', required: true, description: 'Redis host' },
-          port: { type: 'number', default: 6379, description: 'Redis port' },
-          password: { type: 'string', description: 'Redis password (optional)' },
-          db: { type: 'number', default: 0, description: 'Database number' },
-          keyPrefix: { type: 'string', default: 'udc:', description: 'Key prefix' },
-          ttl: { type: 'number', default: 3600, description: 'Default TTL in seconds' }
-        }
-      }
-    };
-
+    const types = storageConfigManager.getTypeInfo();
     res.json({
       timestamp: new Date().toISOString(),
-      storageTypes
+      types,
+      storageTypes: Object.fromEntries(types.map(({ type, ...info }) => [type, info]))
     });
 
   } catch (error) {
@@ -480,17 +427,12 @@ router.post('/storage/test', async (req, res) => {
 // Get storage health and statistics
 router.get('/storage/health', async (req, res) => {
   try {
-    const healthInfo = await storageConfigManager.getStorageHealth();
-    
+    const engine = req.app.get('serverInstance')?.getEngine();
+    const healthInfo = await storageConfigManager.getStorageHealth(engine);
+
     res.json({
       timestamp: new Date().toISOString(),
-      storage: {
-        type: healthInfo.type,
-        status: healthInfo.status,
-        health: healthInfo.health,
-        statistics: healthInfo.statistics,
-        lastCheck: healthInfo.lastCheck
-      }
+      storage: healthInfo
     });
 
   } catch (error) {
@@ -760,8 +702,8 @@ router.post('/storage/configure', async (req, res) => {
       });
     }
     
-    // Apply new storage configuration
-    const storageConfig = { type, config };
+    // Apply new storage configuration (normalized: defaults + renamed fields)
+    const storageConfig = { type: validationResult.type, config: validationResult.config };
     const result = await server.reloadStorageConfiguration(storageConfig);
     
     logger.info('Storage configuration updated via API', { 
@@ -774,7 +716,8 @@ router.post('/storage/configure', async (req, res) => {
       timestamp: new Date().toISOString(),
       message: 'Storage configuration updated successfully',
       storage: {
-        type,
+        type: storageConfig.type,
+        config: storageConfig.config,
         connectionTest: {
           success: testResult.success,
           responseTime: testResult.responseTime

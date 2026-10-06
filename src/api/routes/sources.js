@@ -266,7 +266,7 @@ router.post('/:id/restart', async (req, res) => {
 });
 
 // Get source data
-router.get('/:id/data', (req, res) => {
+router.get('/:id/data', async (req, res) => {
   try {
     const sourceId = req.params.id;
     const limit = parseInt(req.query.limit) || 100;
@@ -289,7 +289,7 @@ router.get('/:id/data', (req, res) => {
       });
     }
 
-    const data = engine.getDataBySource(sourceId, limit);
+    const data = await engine.getDataBySource(sourceId, limit);
 
     res.json({
       timestamp: new Date().toISOString(),

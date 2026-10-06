@@ -274,6 +274,41 @@ Clear stored data.
 **Query Parameters:**
 - `source` (optional): Clear data from specific source only
 
+### History Endpoints (TimescaleDB)
+
+Read-only access to the historical data recorded in TimescaleDB, used by the **History** page of the UI.
+The connection is taken from the active storage when it is TimescaleDB, otherwise from `config/storage.json`
+(`storage` or `alternatives.timescaledb`), so history stays browsable even when the engine is currently
+writing elsewhere. All times are ISO 8601.
+
+#### GET /api/history/status
+TimescaleDB availability, whether it is currently recording, and the recorded time range.
+
+#### GET /api/history/sources
+Sources with recorded data (`sourceId`, `records`, `first`, `last`).
+Optional `startTime`, `endTime`.
+
+#### GET /api/history/measurements
+Measurements recorded for a source (`id`, `type`, `device`, `numeric`).
+
+**Query Parameters:** `source` (required), `startTime`, `endTime` (default: last 24h)
+
+#### GET /api/history/series
+Downsampled time series using `time_bucket`: per bucket `avg`, `min`, `max`, `last`, `samples`.
+Booleans are plotted as 0/1. The bucket is chosen automatically from the range and `maxPoints`.
+
+**Query Parameters:**
+- `source` (required)
+- `measurements` (required): comma-separated measurement ids (max 20)
+- `startTime`, `endTime` (default: last hour)
+- `maxPoints` (optional, default 500, max 5000)
+- `bucket` (optional): one of `1 second` … `30 days`
+
+#### GET /api/history/records
+Raw records, newest first.
+
+**Query Parameters:** `source` (optional), `startTime`, `endTime` (default: last hour), `limit` (max 1000), `offset`, `order` (`asc`|`desc`). The response includes `hasMore`.
+
 ### Configuration Endpoints
 
 #### GET /api/config

@@ -3,7 +3,7 @@ const router = express.Router();
 const logger = require('../../utils/logger');
 
 // Get latest data points
-router.get('/latest', (req, res) => {
+router.get('/latest', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 100;
     const sourceId = req.query.source;
@@ -20,9 +20,9 @@ router.get('/latest', (req, res) => {
 
     let data;
     if (sourceId) {
-      data = engine.getDataBySource(sourceId, limit);
+      data = await engine.getDataBySource(sourceId, limit);
     } else {
-      data = engine.getLatestData(limit);
+      data = await engine.getLatestData(null, limit);
     }
     
     res.json({
@@ -43,7 +43,7 @@ router.get('/latest', (req, res) => {
 });
 
 // Get data by source
-router.get('/source/:sourceId', (req, res) => {
+router.get('/source/:sourceId', async (req, res) => {
   try {
     const sourceId = req.params.sourceId;
     const limit = parseInt(req.query.limit) || 100;
@@ -62,9 +62,9 @@ router.get('/source/:sourceId', (req, res) => {
 
     let data;
     if (startTime && endTime) {
-      data = engine.dataStore.getBySourceAndTimeRange(sourceId, startTime, endTime);
+      data = await engine.dataStore.getBySourceAndTimeRange(sourceId, startTime, endTime);
     } else {
-      data = engine.getDataBySource(sourceId, limit);
+      data = await engine.getDataBySource(sourceId, limit);
     }
     
     res.json({
@@ -86,7 +86,7 @@ router.get('/source/:sourceId', (req, res) => {
 });
 
 // Search data
-router.get('/search', (req, res) => {
+router.get('/search', async (req, res) => {
   try {
     const query = req.query.q;
     const limit = parseInt(req.query.limit) || 100;
@@ -108,7 +108,7 @@ router.get('/search', (req, res) => {
       });
     }
 
-    const results = engine.dataStore.search(query);
+    const results = (await engine.dataStore.search(query)) || [];
     const limitedResults = results.slice(0, limit);
     
     res.json({
@@ -130,7 +130,7 @@ router.get('/search', (req, res) => {
 });
 
 // Get data by time range
-router.get('/range', (req, res) => {
+router.get('/range', async (req, res) => {
   try {
     const startTime = req.query.startTime;
     const endTime = req.query.endTime;
@@ -155,9 +155,9 @@ router.get('/range', (req, res) => {
 
     let data;
     if (sourceId) {
-      data = engine.dataStore.getBySourceAndTimeRange(sourceId, startTime, endTime);
+      data = await engine.dataStore.getBySourceAndTimeRange(sourceId, startTime, endTime);
     } else {
-      data = engine.dataStore.getByTimeRange(startTime, endTime);
+      data = await engine.dataStore.getByTimeRange(startTime, endTime);
     }
     
     res.json({
@@ -178,7 +178,7 @@ router.get('/range', (req, res) => {
 });
 
 // Export data
-router.get('/export', (req, res) => {
+router.get('/export', async (req, res) => {
   try {
     const format = req.query.format || 'json';
     const sourceId = req.query.source;
@@ -199,15 +199,15 @@ router.get('/export', (req, res) => {
     let data;
     if (startTime && endTime) {
       if (sourceId) {
-        data = engine.dataStore.getBySourceAndTimeRange(sourceId, startTime, endTime);
+        data = await engine.dataStore.getBySourceAndTimeRange(sourceId, startTime, endTime);
       } else {
-        data = engine.dataStore.getByTimeRange(startTime, endTime);
+        data = await engine.dataStore.getByTimeRange(startTime, endTime);
       }
     } else {
       if (sourceId) {
-        data = engine.getDataBySource(sourceId, limit);
+        data = await engine.getDataBySource(sourceId, limit);
       } else {
-        data = engine.getLatestData(limit);
+        data = await engine.getLatestData(null, limit);
       }
     }
 
