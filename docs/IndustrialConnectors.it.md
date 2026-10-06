@@ -155,34 +155,55 @@ Connects to Siemens S7 PLCs using the S7 protocol over Ethernet.
 ## EtherCAT Connector
 
 **Type:** `ethercat`  
-**Protocol:** EtherCAT
+**Library:** `ads-client` (Beckhoff ADS/AMS, TCP 48898)  
+**Protocol:** EtherCAT via TwinCAT master
 
 ### Description
-EtherCAT (Ethernet for Control Automation Technology) is a high-performance, low-latency industrial Ethernet protocol. 
+EtherCAT is a real-time Layer 2 protocol (EtherType 0x88A4) whose cycle is run by an EtherCAT master with raw Ethernet access and real-time scheduling, which a Node.js process cannot provide. The connector therefore talks to the **TwinCAT EtherCAT master** over **ADS**, the standard access path for SCADA/IIoT software:
 
-**Note:** Direct EtherCAT support requires specialized hardware and real-time OS. This is a conceptual implementation. For production use, consider using Beckhoff TwinCAT or similar EtherCAT master software.
+- **Process data (PDO):** PLC symbols linked to the slaves' I/O (`symbol`), or raw process-image access (`indexGroup`/`indexOffset`/`type`; `0xF020` = inputs, `0xF030` = outputs). All points are read with **one ADS sum command per cycle**.
+- **Slave diagnostics:** EtherCAT state (`INIT`/`PREOP`/`SAFEOP`/`OP`, plus `+ERROR`) and link state of every slave, read from the EtherCAT master device (`masterAmsNetId`).
+- **CoE mailbox:** periodic SDO reads (`sdo`), plus `readSdo()` / `writeSdo()` on the connector.
+
+Modes: `ads` (default) or `simulation` (random values, no hardware).
 
 ### Configuration Example
 ```json
 {
-  "id": "ethercat-master-1",
+  "id": "ethercat-line-1",
   "type": "ethercat",
   "enabled": true,
   "config": {
-    "networkInterface": "eth0",
-    "cycleTime": 1,
+    "mode": "ads",
+    "targetAmsNetId": "192.168.1.120.1.1",
+    "targetAdsPort": 851,
+    "masterAmsNetId": "192.168.1.120.3.1",
+    "routerAddress": "192.168.1.120",
+    "localAmsNetId": "192.168.1.10.1.1",
+    "localAdsPort": 32750,
+    "pollingInterval": 100,
+    "diagnosticsInterval": 1000,
     "slaves": [
       {
-        "position": 0,
-        "name": "IO_Module_1",
-        "vendorId": "0x00000002",
-        "productCode": "0x044c2c52",
+        "name": "EL1008",
+        "position": 1,
         "inputs": [
-          { "name": "input_1", "type": "digital" },
-          { "name": "analog_in", "type": "analog" }
+          { "name": "sensor_1", "symbol": "GVL_IO.bSensor1" }
+        ]
+      },
+      {
+        "name": "EL3202",
+        "address": 1003,
+        "inputs": [
+          { "name": "temperature", "symbol": "GVL_IO.rTemp1" },
+          { "name": "raw_ch1", "indexGroup": "0xF020", "indexOffset": 10, "type": "INT" }
         ],
         "outputs": [
-          { "name": "output_1", "type": "digital" }
+          { "name": "valve", "symbol": "GVL_IO.bValve" },
+          { "name": "do_bit2", "indexGroup": "0xF030", "indexOffset": 1, "type": "BYTE", "bit": 2 }
+        ],
+        "sdo": [
+          { "name": "vendorId", "index": "0x1018", "subIndex": 1, "type": "UDINT" }
         ]
       }
     ]
@@ -190,40 +211,66 @@ EtherCAT (Ethernet for Control Automation Technology) is a high-performance, low
 }
 ```
 
+| Field | Description |
+|---|---|
+| `targetAmsNetId` / `targetAdsPort` | TwinCAT system and PLC runtime port (851 = TC3 PLC1, 801 = TC2) |
+| `masterAmsNetId` | AMS Net ID of the EtherCAT master device (TwinCAT → I/O → Device EtherCAT → EtherCAT tab). Optional; enables slave states and SDO |
+| `routerAddress`, `routerTcpPort` | ADS router to connect to (default: local router `127.0.0.1:48898`) |
+| `localAmsNetId`, `localAdsPort` | Needed when this host has **no TwinCAT router**; add a static route for this host on the TwinCAT system |
+| `slaves[].position` / `address` | Bus position (0-based) or EtherCAT fixed address (e.g. 1001). `address` is required for SDO access (resolved from `position` when the master is reachable) |
+| `inputs[]` / `outputs[]` | `symbol`, or `indexGroup` + `indexOffset` + `type` (`BOOL, BYTE, USINT, SINT, WORD, UINT, INT, DWORD, UDINT, DINT, REAL, LREAL, LINT, ULINT`), optional `bit` |
+
+If only raw addresses are used, the connector runs as a raw ADS client and does not need a running PLC. After a PLC online change, symbol addresses are resolved again automatically.
+
 ---
 
 ## PROFINET Connector
 
 **Type:** `profinet`  
-**Protocol:** PROFINET IO
+**Library:** `nodes7` (S7comm, ISO-on-TCP 102)  
+**Protocol:** PROFINET IO via IO Controller
 
 ### Description
-PROFINET is a widely used industrial Ethernet protocol, particularly in Siemens automation systems.
+PROFINET IO cyclic data uses Layer 2 real-time frames (EtherType 0x8892) exchanged between the **IO Controller** and the **IO Devices**. The engineering tool (TIA Portal / STEP 7) maps every IO Device module into the controller's **process image** (I/Q addresses). The connector reads and writes these addresses on the Siemens IO Controller, which gives the live values of each PROFINET device without disturbing the real-time communication.
 
-**Note:** Direct PROFINET requires specialized drivers. This implementation uses controller interface communication.
+- Each IO point declares the address assigned in the hardware configuration: `I0.0`, `IB2`, `IW64`, `ID100`, `IR68` (REAL), `Q0.1`, `QW80`, peripheral `PIW256`, as well as `M…` and `DB…` (e.g. `DB10,REAL4`).
+- Optional linear `scale` for analog values (e.g. 0..27648 → 0..100 °C).
+- Device `status`: `ONLINE`, `ERROR` (a point could not be read), or `OFFLINE`.
+- `writeOutput(device, output, value)` writes to the Q area.
+
+Modes: `s7` (default) or `simulation` (random values, no hardware).
+
+**S7-1200/1500:** enable *Permit access with PUT/GET communication* in the CPU protection settings. Typical `slot`: 1 for S7-1200/1500, 2 for S7-300.
 
 ### Configuration Example
 ```json
 {
-  "id": "profinet-controller-1",
+  "id": "profinet-line-1",
   "type": "profinet",
   "enabled": true,
   "config": {
-    "controllerIp": "192.168.1.30",
-    "cycleTime": 10,
+    "mode": "s7",
+    "controllerIp": "192.168.0.1",
+    "rack": 0,
+    "slot": 1,
+    "pollingInterval": 100,
     "devices": [
       {
-        "name": "IO_Device_1",
-        "slot": 1,
-        "type": "ET200S",
-        "vendorId": "0x002a",
-        "deviceId": "0x0101",
+        "name": "ET200SP_1",
+        "stationName": "et200sp-1",
         "inputs": [
-          { "name": "sensor_1", "type": "digital" },
-          { "name": "sensor_2", "type": "analog" }
+          { "name": "sensor_1", "address": "I0.0" },
+          { "name": "temperature", "address": "IW64",
+            "scale": { "rawMin": 0, "rawMax": 27648, "engMin": 0, "engMax": 100 } }
         ],
         "outputs": [
-          { "name": "valve_1", "type": "digital" }
+          { "name": "valve_1", "address": "Q0.0" }
+        ]
+      },
+      {
+        "name": "G120_Drive",
+        "inputs": [
+          { "name": "actual_speed", "address": "IW256" }
         ]
       }
     ]
@@ -559,8 +606,8 @@ npm install ethernet-ip
 |----------|------|-------|--------------|-----------|------------------|
 | Modbus TCP/RTU | ✅ | ✅ | ❌ | ⚡ Fast | modbus-serial |
 | Siemens S7 | ✅ | ✅ | ❌ | ⚡ Fast | nodes7 |
-| EtherCAT | ✅ | ✅ | ✅ | ⚡⚡ Ultra-fast | Hardware dependent |
-| PROFINET | ✅ | ✅ | ✅ | ⚡⚡ Ultra-fast | Hardware dependent |
+| EtherCAT | ✅ | ✅ | ✅ | ⚡ Fast | Via TwinCAT ADS (`ads-client`) |
+| PROFINET | ✅ | ✅ | ✅ | ⚡ Fast | Via IO Controller S7 (`nodes7`) |
 | BACnet | ✅ | ✅ | ✅ | 🔄 Medium | bacstack |
 | FINS (Omron) | ✅ | ✅ | ❌ | ⚡ Fast | Built-in |
 | MELSEC | ✅ | ✅ | ❌ | ⚡ Fast | Built-in |
@@ -572,7 +619,7 @@ npm install ethernet-ip
 ## Best Practices
 
 1. **Polling Intervals**: Adjust based on network load and data criticality
-   - Real-time control: 1-10ms (EtherCAT, PROFINET)
+   - Fieldbus monitoring: 50-200ms (EtherCAT via ADS, PROFINET via IO Controller; the real-time cycle stays in the master/controller)
    - Fast monitoring: 100-500ms (Modbus, S7)
    - Standard monitoring: 1000-5000ms (BACnet, Serial)
 
