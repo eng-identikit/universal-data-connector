@@ -743,3 +743,26 @@ Get current engine status and dynamic configuration capabilities.
 ### Source Configuration
 
 // ...existing source configuration endpoints...
+
+### WebSocket (Real-time Stream)
+
+Il server invia i dati live su una porta WebSocket separata: `ws://<host>:3001` (variabile `WS_PORT`). È usata dalla pagina **Dati Live** della UI.
+
+**Messaggi server → client:**
+
+| `type` | Campi | Quando |
+|--------|-------|--------|
+| `welcome` | `message`, `timestamp` | Alla connessione |
+| `data` | `payload`, `timestamp` | A ogni pacchetto di dati mappati |
+| `sourceStatus` | `sourceId`, `status`, `timestamp` | Una sorgente cambia stato (`connected`, `disconnected`, `error`, ...) |
+
+Il `payload` di un messaggio `data` è `{ sourceId, originalData, mappedData, timestamp }` oppure direttamente il dispositivo mappato. In entrambi i casi il dispositivo segue il formato unificato `{ id, type, measurements: [{ id, type, value, unit? }], metadata }`.
+
+**Messaggi client → server:**
+
+```json
+{ "type": "subscribe", "sourceId": "plc-line1" }
+{ "type": "unsubscribe", "sourceId": "plc-line1" }
+```
+
+Un client senza sottoscrizioni riceve tutti i messaggi. Il filtro di sottoscrizione vale solo per i messaggi che hanno un `sourceId` di primo livello (come `sourceStatus`).

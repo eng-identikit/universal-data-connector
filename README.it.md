@@ -160,6 +160,27 @@ Supporto per tre layer di trasporto (configurabili in `mapping.json`):
 }
 ```
 
+### 5. **Storage e Storico**
+
+I dati mappati vengono salvati nello storage configurato in `config/storage.json`: **Memory**, **Redis** o **TimescaleDB**.
+
+- **Fallback**: se all'avvio lo storage non è raggiungibile, il server parte comunque e tiene i dati in memoria. Riprova a connettersi ogni 30 s (`STORAGE_RETRY_INTERVAL`) e, quando lo storage torna disponibile, ci trasferisce i dati accumulati.
+- **Cambio a caldo**: lo storage si può cambiare a runtime (`POST /api/config/storage/configure`). Il nuovo storage viene connesso prima di sostituire il vecchio, quindi se il cambio fallisce resta attivo quello attuale.
+- **API Storico**: `/api/history/*` legge i dati registrati in TimescaleDB, ricampionati con `time_bucket` (avg/min/max/last per intervallo). Funziona anche quando l'engine sta scrivendo su un altro storage.
+
+Dettagli: [Guida Storage](./docs/Storage.it.md), [endpoint History](./docs/API.it.md#history-endpoints-timescaledb).
+
+### 6. **Stream in Tempo Reale (WebSocket)**
+
+Ogni pacchetto di dati mappati viene inviato ai client WebSocket sulla porta `3001` (`WS_PORT`):
+
+```json
+{ "type": "data", "payload": { "sourceId": "plc-line1", "mappedData": { "id": "...", "measurements": [ ... ] }, "timestamp": "..." }, "timestamp": "..." }
+{ "type": "sourceStatus", "sourceId": "plc-line1", "status": "connected", "timestamp": "..." }
+```
+
+La [Web UI](../universal-data-connector-ui/README.it.md) usa questo stream per i grafici in tempo reale. I dettagli del protocollo sono nella [documentazione API](./docs/API.it.md#websocket-real-time-stream).
+
 ## 📁 Struttura File Principali
 
 ```
@@ -169,6 +190,12 @@ universal-data-connector/
 │   ├── sources.json          # Configurazione sorgenti dati
 │   └── storage.json          # Configurazione storage (opzionale)
 ├── src/
+│   ├── server.js             # REST API (porta 3000) + WebSocket (porta 3001)
+│   ├── api/routes/           # Route REST (status, sources, data, history, config, ...)
+│   ├── connectors/protocols/ # Un connettore per protocollo (OPC UA, Modbus, PROFINET, EtherCAT, ...)
+│   ├── storage/
+│   │   ├── StorageFactory.js     # Adapter Memory, Redis, TimescaleDB
+│   │   └── TimescaleHistory.js   # Query storico (ricampionamento time_bucket)
 │   ├── mappingTools/
 │   │   ├── MappingEngine.js      # Gestione mapping e discovery
 │   │   ├── UniversalDataModel.js # Modello dati unificato
@@ -335,11 +362,17 @@ Esempio: Conversione Celsius → Fahrenheit
 
 ## 📊 Protocolli Supportati
 
-- **OPC UA** - OPCUAMapper con supporto nodeId, data types, quality
-- **Modbus** - ModbusMapper per holding, input, coil, discrete registers
-- **MQTT** - MQTTMapper con parsing JSON automatico
-- **HTTP** - GenericMapper per REST APIs
-- **Altri** - GenericMapper per qualsiasi protocollo
+| Area | Connettori |
+|------|------------|
+| IT / IoT | **OPC UA**, **MQTT**, **HTTP** (polling REST) |
+| PLC industriali | **Modbus** TCP/RTU, **Siemens S7**, **PROFINET** (immagine di processo degli IO Device tramite l'IO Controller S7), **EtherCAT** (master TwinCAT via ADS: PDO, stati degli slave, CoE SDO), **FINS** (Omron), **MELSEC** (Mitsubishi), **CIP / EtherNet/IP** |
+| Building automation | **BACnet** |
+| Seriale | **Serial** (RS-232/RS-485) |
+| Industria 4.0 / 5.0 | **AAS** (Asset Administration Shell), **i3X** |
+
+PROFINET ed EtherCAT hanno anche una modalità `simulation` che genera valori casuali senza hardware.
+
+Esistono mapper dedicati per OPC UA (nodeId, tipi di dato, quality), Modbus (registri holding/input/coil/discrete), MQTT (parsing JSON automatico) e AAS. Tutti gli altri protocolli usano il GenericMapper. Vedi la [guida ai Connettori Industriali](./docs/IndustrialConnectors.it.md).
 
 ## 🎯 Vantaggi della Nuova Architettura
 
@@ -387,10 +420,14 @@ const stats = engine.getStatistics();
 
 ## 📖 Ulteriori Risorse
 
-- [API Documentation](./docs/API.md)
-- [Configuration Guide](./docs/Configuration.md)
-- [Mapping Guide](./docs/Mapping.md)
-- [Transport Guide](./docs/Transport.md)
+- [Documentazione API](./docs/API.it.md)
+- [Guida alla Configurazione](./docs/Configuration.it.md)
+- [Configurazione Dinamica](./docs/DynamicConfiguration.it.md)
+- [Guida al Mapping](./docs/Mapping.it.md)
+- [Auto Discovery](./docs/AutoDiscovery.it.md)
+- [Connettori Industriali](./docs/IndustrialConnectors.it.md)
+- [Guida Storage](./docs/Storage.it.md)
+- [Web UI](../universal-data-connector-ui/README.it.md): dashboard, grafici in tempo reale, storico
 
 ---
 
