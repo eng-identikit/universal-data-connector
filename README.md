@@ -364,13 +364,13 @@ Example: Celsius → Fahrenheit conversion
 
 | Area | Connectors |
 |------|------------|
-| IT / IoT | **OPC UA**, **MQTT**, **HTTP** (REST polling) |
+| IT / IoT | **OPC UA**, **MQTT**, **HTTP** (REST polling), **DDS** (RTPS: RTI Connext, Fast DDS, Cyclone DDS, ROS 2) |
 | Industrial PLC | **Modbus** TCP/RTU, **Siemens S7**, **PROFINET** (IO Devices' process image via the S7 IO Controller), **EtherCAT** (TwinCAT master over ADS: PDOs, slave states, CoE SDO), **FINS** (Omron), **MELSEC** (Mitsubishi), **CIP / EtherNet/IP** |
 | Building automation | **BACnet** |
 | Serial | **Serial** (RS-232/RS-485) |
 | Industry 4.0 / 5.0 | **AAS** (Asset Administration Shell), **i3X** |
 
-PROFINET and EtherCAT also have a `simulation` mode that generates random values without hardware.
+PROFINET, EtherCAT and DDS also have a `simulation` mode that generates random values without hardware.
 
 Dedicated mappers exist for OPC UA (nodeId, data types, quality), Modbus (holding/input/coil/discrete registers), MQTT (automatic JSON parsing) and AAS. All other protocols use the GenericMapper. See the [Industrial Connectors guide](./docs/IndustrialConnectors.md).
 

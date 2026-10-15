@@ -7,10 +7,11 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "node tests/run-tests.js",
-    "test:unit": "node tests/test-drivers.js && node tests/test-connectors.js && node tests/test-fieldbus.js && node tests/test-mapping.js && node tests/test-storage.js",
+    "test:unit": "node tests/test-drivers.js && node tests/test-connectors.js && node tests/test-fieldbus.js && node tests/test-dds.js && node tests/test-mapping.js && node tests/test-storage.js",
     "test:udc": "node tests/test-udc.js",
     "test:connectors": "node tests/test-connectors.js",
     "test:fieldbus": "node tests/test-fieldbus.js",
+    "test:dds": "node tests/test-dds.js",
     "test:mapping": "node tests/test-mapping.js",
     "test:storage": "node tests/test-storage.js",
     "test:dynamic-config": "node tests/test-dynamic-config.js",
@@ -23,6 +24,7 @@
     "data-connector",
     "opc-ua",
     "mqtt",
+    "dds",
     "http",
     "modbus",
     "ethercat",
@@ -70,5 +72,8 @@
     "@types/node": "^20.10.4",
     "jest": "^29.7.0",
     "nodemon": "^3.0.2"
+  },
+  "optionalDependencies": {
+    "rticonnextdds-connector": "^1.5.0"
   }
 }

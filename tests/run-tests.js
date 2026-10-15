@@ -21,6 +21,7 @@ const TESTS = [
   { name: 'Drivers',       script: 'tests/test-drivers.js',        requiresServer: false },
   { name: 'Connectors',    script: 'tests/test-connectors.js',     requiresServer: false },
   { name: 'Fieldbus',      script: 'tests/test-fieldbus.js',       requiresServer: false },
+  { name: 'DDS',           script: 'tests/test-dds.js',            requiresServer: false },
   { name: 'Mapping',       script: 'tests/test-mapping.js',        requiresServer: false },
   { name: 'Storage',       script: 'tests/test-storage.js',        requiresServer: false },
   { name: 'UDC Full Suite',script: 'tests/test-udc.js',            requiresServer: true  },

@@ -28,6 +28,7 @@ const connectorLoaders = {
   'aas':                      () => require('./protocols/AASConnector'),
   'asset-administration-shell': () => require('./protocols/AASConnector'),
   'i3x':                      () => require('./protocols/I3XConnector'),
+  'dds':                      () => require('./protocols/DdsConnector'),
 };
 
 // Cache already-loaded classes to avoid repeated require() calls

@@ -585,6 +585,58 @@
       }
     },
     {
+      "id": "dds-plant",
+      "type": "dds",
+      "enabled": false,
+      "name": "DDS Plant Data Bus",
+      "description": "OMG DDS (RTPS) participant - subscribes PlantSensorData and publishes PlantSetpoint. Interoperates with RTI Connext, Fast DDS, Cyclone DDS, OpenDDS and ROS 2. Requires the optional package rticonnextdds-connector.",
+      "config": {
+        "mode": "connector",
+        "configFile": "config/dds/UdcDdsExample.xml",
+        "participant": "UdcParticipantLibrary::UdcParticipant",
+        "waitTimeout": 1000,
+        "inputs": [
+          {
+            "name": "sensors",
+            "reader": "UdcSubscriber::SensorReader",
+            "deviceIdField": "sensor_id"
+          }
+        ],
+        "outputs": [
+          {
+            "name": "setpoint",
+            "writer": "UdcPublisher::SetpointWriter"
+          }
+        ]
+      },
+      "retryConfig": {
+        "enabled": true,
+        "maxRetries": 5,
+        "retryDelay": 5000
+      }
+    },
+    {
+      "id": "dds-simulation",
+      "type": "dds",
+      "enabled": false,
+      "name": "DDS Simulation",
+      "description": "DDS connector in simulation mode - random samples, no DDS domain required",
+      "config": {
+        "mode": "simulation",
+        "simulationInterval": 1000,
+        "inputs": [
+          {
+            "name": "sensors",
+            "fields": {
+              "temperature": { "min": 18, "max": 30 },
+              "pressure": { "min": 0.9, "max": 1.3 },
+              "running": "boolean"
+            }
+          }
+        ]
+      }
+    },
+    {
       "id": "serial-ascii-example",
       "type": "serial",
       "enabled": false,

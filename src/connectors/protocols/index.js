@@ -8,6 +8,7 @@
 const OpcUaConnector = require('./OpcUaConnector');
 const MqttConnector = require('./MqttConnector');
 const HttpConnector = require('./HttpConnector');
+const DdsConnector = require('./DdsConnector');
 
 // Industrial PLC Protocols
 const ModbusConnector = require('./ModbusConnector');
@@ -33,6 +34,7 @@ module.exports = {
   OpcUaConnector,
   MqttConnector,
   HttpConnector,
+  DdsConnector,
 
   // Industrial PLC
   ModbusConnector,

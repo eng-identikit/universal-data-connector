@@ -75,6 +75,7 @@ class MappingEngine {
     this.registerMapper('melsec', new GenericMapper({ sourceType: 'melsec' }));
     this.registerMapper('cip', new GenericMapper({ sourceType: 'cip' }));
     this.registerMapper('serial', new GenericMapper({ sourceType: 'serial' }));
+    this.registerMapper('dds', new GenericMapper({ sourceType: 'dds' }));
 
     logger.debug(`Registered ${this.mappers.size} default mappers`);
   }

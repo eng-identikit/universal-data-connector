@@ -17,6 +17,7 @@ Questo documento fornisce informazioni dettagliate su tutti i connettori di prot
 7. [MELSEC (Mitsubishi) Connector](#melsec-mitsubishi-connector)
 8. [CIP/EtherNet/IP Connector](#cipethernet-ip-connector)
 9. [Serial Connector](#serial-connector)
+10. [DDS Connector](#dds-connector)
 
 ---
 
@@ -571,6 +572,85 @@ Generic serial communication connector for devices using custom protocols, legac
 
 ---
 
+## DDS Connector
+
+**Type:** `dds`  
+**Library:** `rticonnextdds-connector` (optional dependency, prebuilt for Windows x64, Linux x64/arm64, macOS arm64)  
+**Protocol:** OMG DDS over RTPS
+
+### Description
+DDS (Data Distribution Service) is a publish/subscribe data bus used in robotics (ROS 2), defense, energy, medical and autonomous systems. The connector joins a DDS domain as a DomainParticipant, subscribes topics through DataReaders and publishes through DataWriters.
+
+The wire protocol is standard DDS-RTPS, so the connector interoperates with **RTI Connext, eProsima Fast DDS, Eclipse Cyclone DDS, OpenDDS and ROS 2 nodes**, as long as topic name, data type and QoS are compatible.
+
+Types, topics, QoS and the participant's readers/writers are declared in an RTI *XML-Based Application Creation* file. A ready-to-use example is in [`config/dds/UdcDdsExample.xml`](../config/dds/UdcDdsExample.xml).
+
+- Each `inputs` entry maps to a DataReader (`"Subscriber::Reader"` in the XML); each `outputs` entry maps to a DataWriter (`"Publisher::Writer"`).
+- Every valid sample received is emitted as one data event: `{ timestamp, source, type, quality, deviceId?, <inputName>: <sample> }`. `timestamp` is the DDS source timestamp of the sample.
+- `deviceIdField` (optional): sample member used as the device id, useful for keyed topics (e.g. one instance per sensor).
+- `writeOutput(output, sample, params?)` publishes a JSON sample on the output's DataWriter. Members not given in `sample` are reset to their defaults. `params` accepts the RTI write parameters, e.g. `{ "action": "dispose" }`.
+- If the DDS wait fails, the participant is closed and recreated according to `retryConfig`.
+
+Modes: `connector` (default) or `simulation` (random samples, no DDS domain needed).
+
+### Configuration Example
+
+#### Real DDS domain
+```json
+{
+  "id": "dds-plant",
+  "type": "dds",
+  "enabled": true,
+  "config": {
+    "mode": "connector",
+    "configFile": "config/dds/UdcDdsExample.xml",
+    "participant": "UdcParticipantLibrary::UdcParticipant",
+    "waitTimeout": 1000,
+    "inputs": [
+      { "name": "sensors", "reader": "UdcSubscriber::SensorReader", "deviceIdField": "sensor_id" }
+    ],
+    "outputs": [
+      { "name": "setpoint", "writer": "UdcPublisher::SetpointWriter" }
+    ]
+  }
+}
+```
+
+A sample `{ "sensor_id": "S1", "temperature": 21.5, "running": true }` on `sensors` becomes device `S1` with measurements `sensors_temperature` and `sensors_running`.
+
+#### Simulation
+```json
+{
+  "id": "dds-simulation",
+  "type": "dds",
+  "config": {
+    "mode": "simulation",
+    "simulationInterval": 1000,
+    "inputs": [
+      { "name": "sensors", "fields": { "temperature": { "min": 18, "max": 30 }, "running": "boolean" } }
+    ]
+  }
+}
+```
+
+### Configuration Parameters
+| Parameter | Description |
+|-----------|-------------|
+| `mode` | `connector` (default) or `simulation` |
+| `configFile` | XML file path, or array of paths (all loaded). Relative paths resolve from the working directory |
+| `participant` | `"ParticipantLibrary::Participant"` to create from the XML |
+| `waitTimeout` | Max wait per read cycle in ms (default 1000). Also the max time `stop()` waits for the read loop |
+| `inputs[]` | `name`, `reader`, optional `deviceIdField`. In simulation: `fields` (`"number"`, `"boolean"`, `"string"` or `{ min, max }`) |
+| `outputs[]` | `name`, `writer` |
+| `simulationInterval` | Sample period in simulation mode, ms (default 1000) |
+
+### Notes
+- **Domain ID and QoS** come from the XML (`<domain domain_id="...">`, `<qos_library>`). To talk to Fast DDS/Cyclone DDS defaults, a reliable or best-effort profile with matching durability is usually enough.
+- **ROS 2:** ROS topic `/chatter` is DDS topic `rt/chatter`, and type `std_msgs/msg/String` is `std_msgs::msg::dds_::String_`. Declare those names in the XML.
+- **Licensing:** `rticonnextdds-connector` is distributed by RTI under its own license (see `LICENSE.pdf` in the package). Review it before production use.
+
+---
+
 ## Installation
 
 Install all connector dependencies:
@@ -596,6 +676,9 @@ npm install serialport
 
 # EtherNet/IP (optional)
 npm install ethernet-ip
+
+# DDS (optional)
+npm install rticonnextdds-connector
 ```
 
 ---
@@ -613,6 +696,7 @@ npm install ethernet-ip
 | MELSEC | ✅ | ✅ | ❌ | ⚡ Fast | Built-in |
 | EtherNet/IP | ✅ | ✅ | ✅ | ⚡ Fast | ethernet-ip |
 | Serial | ✅ | ✅ | ❌ | 🔄 Variable | serialport |
+| DDS | ✅ | ✅ | ✅ | ⚡ Fast | rticonnextdds-connector (optional) |
 
 ---
 

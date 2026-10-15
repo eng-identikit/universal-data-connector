@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!-- DDS loopback fixture for tests/test-dds.js: isolated domain 87, UDC participant + simulated device -->
+<dds>
+  <qos_library name="UdcTestQos">
+    <qos_profile name="Reliable" base_name="BuiltinQosLib::Generic.StrictReliable" is_default_qos="true"/>
+  </qos_library>
+
+  <types>
+    <struct name="SensorData">
+      <member name="sensor_id" type="string" stringMaxLength="64" key="true"/>
+      <member name="temperature" type="float64"/>
+      <member name="running" type="boolean"/>
+    </struct>
+    <struct name="Setpoint">
+      <member name="target_id" type="string" stringMaxLength="64" key="true"/>
+      <member name="value" type="float64"/>
+    </struct>
+  </types>
+
+  <domain_library name="UdcTestDomains">
+    <domain name="TestDomain" domain_id="87">
+      <register_type name="SensorData" type_ref="SensorData"/>
+      <register_type name="Setpoint" type_ref="Setpoint"/>
+      <topic name="TestSensorData" register_type_ref="SensorData"/>
+      <topic name="TestSetpoint" register_type_ref="Setpoint"/>
+    </domain>
+  </domain_library>
+
+  <domain_participant_library name="UdcTestParticipants">
+    <domain_participant name="Udc" domain_ref="UdcTestDomains::TestDomain">
+      <subscriber name="Sub">
+        <data_reader name="SensorReader" topic_ref="TestSensorData"/>
+      </subscriber>
+      <publisher name="Pub">
+        <data_writer name="SetpointWriter" topic_ref="TestSetpoint"/>
+      </publisher>
+    </domain_participant>
+    <domain_participant name="Device" domain_ref="UdcTestDomains::TestDomain">
+      <publisher name="Pub">
+        <data_writer name="SensorWriter" topic_ref="TestSensorData"/>
+      </publisher>
+      <subscriber name="Sub">
+        <data_reader name="SetpointReader" topic_ref="TestSetpoint"/>
+      </subscriber>
+    </domain_participant>
+  </domain_participant_library>
+</dds>

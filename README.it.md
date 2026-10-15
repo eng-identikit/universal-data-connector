@@ -364,13 +364,13 @@ Esempio: Conversione Celsius → Fahrenheit
 
 | Area | Connettori |
 |------|------------|
-| IT / IoT | **OPC UA**, **MQTT**, **HTTP** (polling REST) |
+| IT / IoT | **OPC UA**, **MQTT**, **HTTP** (polling REST), **DDS** (RTPS: RTI Connext, Fast DDS, Cyclone DDS, ROS 2) |
 | PLC industriali | **Modbus** TCP/RTU, **Siemens S7**, **PROFINET** (immagine di processo degli IO Device tramite l'IO Controller S7), **EtherCAT** (master TwinCAT via ADS: PDO, stati degli slave, CoE SDO), **FINS** (Omron), **MELSEC** (Mitsubishi), **CIP / EtherNet/IP** |
 | Building automation | **BACnet** |
 | Seriale | **Serial** (RS-232/RS-485) |
 | Industria 4.0 / 5.0 | **AAS** (Asset Administration Shell), **i3X** |
 
-PROFINET ed EtherCAT hanno anche una modalità `simulation` che genera valori casuali senza hardware.
+PROFINET, EtherCAT e DDS hanno anche una modalità `simulation` che genera valori casuali senza hardware.
 
 Esistono mapper dedicati per OPC UA (nodeId, tipi di dato, quality), Modbus (registri holding/input/coil/discrete), MQTT (parsing JSON automatico) e AAS. Tutti gli altri protocolli usano il GenericMapper. Vedi la [guida ai Connettori Industriali](./docs/IndustrialConnectors.it.md).
 
