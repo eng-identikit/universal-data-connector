@@ -174,7 +174,7 @@ Ogni pacchetto di dati mappati viene inviato ai client WebSocket sulla porta `30
 { "type": "sourceStatus", "sourceId": "plc-line1", "status": "connected", "timestamp": "..." }
 ```
 
-La [Web UI](../universal-data-connector-ui/README.it.md) usa questo stream per i grafici in tempo reale. I dettagli del protocollo sono nella [documentazione API](./docs/API.it.md#websocket-real-time-stream).
+La [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui/blob/main/README.it.md) usa questo stream per i grafici in tempo reale. I dettagli del protocollo sono nella [documentazione API](./docs/API.it.md#websocket-real-time-stream).
 
 ## 📁 Struttura File Principali
 
@@ -422,7 +422,7 @@ const stats = engine.getStatistics();
 - [Auto Discovery](./docs/AutoDiscovery.it.md)
 - [Connettori Industriali](./docs/IndustrialConnectors.it.md)
 - [Guida Storage](./docs/Storage.it.md)
-- [Web UI](../universal-data-connector-ui/README.it.md): dashboard, grafici in tempo reale, storico
+- [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui/blob/main/README.it.md): dashboard, grafici in tempo reale, storico
 
 ---
 

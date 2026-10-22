@@ -174,7 +174,7 @@ Every mapped data packet is pushed to WebSocket clients on port `3001` (`WS_PORT
 { "type": "sourceStatus", "sourceId": "plc-line1", "status": "connected", "timestamp": "..." }
 ```
 
-The [Web UI](../universal-data-connector-ui/README.md) uses this stream for its real-time charts. Protocol details are in the [API documentation](./docs/API.md#websocket-real-time-stream).
+The [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui) uses this stream for its real-time charts. Protocol details are in the [API documentation](./docs/API.md#websocket-real-time-stream).
 
 ## 📁 Main File Structure
 
@@ -422,7 +422,7 @@ const stats = engine.getStatistics();
 - [Auto Discovery](./docs/AutoDiscovery.md)
 - [Industrial Connectors](./docs/IndustrialConnectors.md)
 - [Storage Guide](./docs/Storage.md)
-- [Web UI](../universal-data-connector-ui/README.md): dashboard, real-time charts, history
+- [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui): dashboard, real-time charts, history
 
 ---
 
