@@ -210,7 +210,7 @@ class UniversalDataModel {
 
   /**
    * Export the data model to TOON format
-   * TOON (Time-Oriented Object Notation) - formato ottimizzato per time-series
+   * TOON (Token-Oriented Object Notation) - formato compatto ottimizzato per LLM
    * @param {Object} options - Export options
    * @returns {Object} TOON representation
    */

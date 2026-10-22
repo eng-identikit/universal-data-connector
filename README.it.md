@@ -131,7 +131,8 @@ Supporto per tre layer di trasporto (configurabili in `mapping.json`):
   "id": "device-001",
   "type": "Sensor",
   "measurements": [
-    {"id": "temp", "type": "float", "value": 23.5}
+    {"id": "temp", "type": "float", "value": 23.5},
+    {"id": "pressure", "type": "float", "value": 1.2}
   ],
   "metadata": {
     "timestamp": "2026-02-13T10:00:00.000Z",
@@ -140,24 +141,18 @@ Supporto per tre layer di trasporto (configurabili in `mapping.json`):
 }
 ```
 
-#### **TOON** (Time-Oriented Object Notation - Compatto)
-```json
-{
-  "format": "TOON",
-  "version": "1.0.0",
-  "timestamp": "2026-02-13T10:00:00.000Z",
-  "devices": [
-    {
-      "i": "device-001",
-      "t": "Sensor",
-      "ts": "2026-02-13T10:00:00.000Z",
-      "m": [
-        {"i": "temp", "t": "float", "v": 23.5}
-      ],
-      "meta": {"source": "opcua"}
-    }
-  ]
-}
+#### **TOON** (Token-Oriented Object Notation - Compatto)
+Formato basato sull'indentazione, pensato per usare meno token del JSON quando i dati vengono passati a un LLM. Gli array di oggetti uniformi diventano tabelle: i nomi dei campi sono dichiarati una sola volta nell'intestazione (`[N]{campi}`) e ogni riga contiene solo i valori.
+
+```toon
+id: device-001
+type: Sensor
+measurements[2]{id,type,value}:
+  temp,float,23.5
+  pressure,float,1.2
+metadata:
+  timestamp: "2026-02-13T10:00:00.000Z"
+  source: opcua
 ```
 
 ### 5. **Storage e Storico**

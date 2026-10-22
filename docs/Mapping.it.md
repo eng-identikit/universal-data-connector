@@ -326,7 +326,7 @@ const ngsiLdData = engine.exportMappedDataToNGSILD({
 
 ### 3. TOON Export
 
-TOON (To be defined) - Ontology-based representation format.
+TOON (Token-Oriented Object Notation) - formato di rappresentazione compatto, ottimizzato per LLM.
 
 ```javascript
 const toonData = engine.exportMappedDataToTOON({
