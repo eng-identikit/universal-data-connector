@@ -16,7 +16,7 @@ L'UDC è anche un **context broker** standalone:
 
 ```bash
 cp .env.example .env          # imposta BROKER_JWT_SECRET e BROKER_ADMIN_PASSWORD
-docker compose up -d --build  # UI su http://localhost:8080, API su /api/v2
+docker compose up -d --build  # UI su http://localhost:8080, API su /api/v1
 ```
 
 Guida completa: [Context broker](./docs/Broker.it.md) (architettura, API, subscription, cluster, Helm, configurazione, prestazioni).
@@ -182,7 +182,7 @@ Dettagli: [Guida Storage](./docs/Storage.it.md), [endpoint History](./docs/API.i
 
 ### 6. **Stream in Tempo Reale (WebSocket)**
 
-Le modifiche alle entità vengono inviate su un WebSocket autenticato, sulla porta dell'API (`/api/v2/stream?access_token=…&tenant=…`). I client si iscrivono a filtri sulle entità o a subscription con canale websocket:
+Le modifiche alle entità vengono inviate su un WebSocket autenticato, sulla porta dell'API (`/api/v1/stream?access_token=…&tenant=…`). I client si iscrivono a filtri sulle entità o a subscription con canale websocket:
 
 ```json
 { "type": "subscribe", "id": "live", "entities": { "types": ["Press"], "idPattern": "plant1:*" } }
@@ -431,7 +431,7 @@ const stats = engine.getStatistics();
 ## 📖 Ulteriori Risorse
 
 - [Context broker](./docs/Broker.it.md): entità, subscription, storico, comandi, cluster, deploy
-- [Documentazione API](./docs/API.it.md) (endpoint del motore dei connettori, ora sotto `/api/v2/system`)
+- [Documentazione API](./docs/API.it.md) (endpoint del motore dei connettori, ora sotto `/api/v1/system`)
 - [Guida alla Configurazione](./docs/Configuration.it.md)
 - [Configurazione Dinamica](./docs/DynamicConfiguration.it.md)
 - [Guida al Mapping](./docs/Mapping.it.md)

@@ -52,7 +52,7 @@ metadata:
   name: {{ include "udc.fullname" . }}
   labels: {{- include "udc.labels" . | nindent 4 }}
   annotations:
-    # Long-lived WebSocket connections on /api/v2/stream
+    # Long-lived WebSocket connections on /api/v1/stream
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     {{- with .Values.ingress.annotations }}

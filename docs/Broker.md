@@ -32,7 +32,7 @@ The Universal Data Connector is a **standalone context broker**. It reads indust
                        ┌──────────────────────────────────┼─────────────────────────────┐
                        ▼                                  ▼                             ▼
               SubscriptionEngine                      StreamHub                 (every instance)
-              (owned partitions)              WebSocket /api/v2/stream
+              (owned partitions)              WebSocket /api/v1/stream
                        │
                        ▼
           UDC_NOTIFY queue (JetStream, at-least-once) ─► DeliveryWorker ─► HTTP / MQTT / NATS / WebSocket
@@ -109,7 +109,7 @@ The UI is at **http://localhost:8080**: nginx forwards `/api` and the WebSocket 
 
 ## API
 
-All routes are under `/api/v2`.
+All routes are under `/api/v1`.
 
 **Authentication**
 - `Authorization: Bearer <jwt>` for users, or `X-API-Key: <key>` for machines.
@@ -130,7 +130,7 @@ All routes are under `/api/v2`.
 | Subscriptions | `GET`/`POST /subscriptions`, `GET`/`PATCH`/`DELETE /subscriptions/:id`, `POST /:id/pause`, `POST /:id/resume`, `POST /:id/test`, `DELETE /:id/stats`, `GET /:id/dlq`, `POST /:id/dlq/replay`, `DELETE /:id/dlq`, `POST /subscriptions/preview`, `POST /expressions/validate` |
 | Administration | `/users` (superadmin), `/tenants`, `/tenants/:id/members`, `/apikeys`, `GET /cluster` (superadmin) |
 | System | `/system/*`: connectors, mapping, storage configuration, engine status. Any authenticated caller can read; only a superadmin can change anything. Replaces the former `/api`. |
-| Stream | `ws://host/api/v2/stream?access_token=…&tenant=…` |
+| Stream | `ws://host/api/v1/stream?access_token=…&tenant=…` |
 
 ## Subscriptions
 
@@ -213,7 +213,7 @@ Evaluation never throws: mismatched types make a comparison false, and arithmeti
 ## Realtime stream
 
 ```
-ws://host/api/v2/stream?access_token=<jwt>&tenant=<id>      (or api_key=<key>)
+ws://host/api/v1/stream?access_token=<jwt>&tenant=<id>      (or api_key=<key>)
 → { "type": "subscribe", "id": "live", "entities": { "types": ["Press"], "idPattern": "plant1:*" } }
 → { "type": "subscribe", "id": "n1", "subscription": "<uuid of a websocket subscription>" }
 ← { "type": "welcome" } · { "type": "entity", "sub": "live", "op": "update", "entity": {...} } · { "type": "notification", "sub": "n1", ... }

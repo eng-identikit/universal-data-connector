@@ -824,16 +824,19 @@ class DataConnectorEngine extends EventEmitter {
   }
 
   getStatus() {
+    const uptime = this.stats.startTime ? Date.now() - this.stats.startTime.getTime() : 0;
     return {
       isRunning: this.isRunning,
       natsConnected: this.natsTransport ? this.natsTransport.isConnected() : false,
+      uptime,
+      connectors: this.getConnectorStatus(),
       stats: {
         totalDataPoints: this.stats.totalDataPoints,
         totalErrors: this.stats.totalErrors,
         startTime: this.stats.startTime,
         lastDataReceived: this.stats.lastDataReceived,
         connectorCount: this.connectors.size,
-        uptime: this.stats.startTime ? Date.now() - this.stats.startTime.getTime() : 0
+        uptime
       }
     };
   }

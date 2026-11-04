@@ -2,7 +2,7 @@
 
 **[🇬🇧 English](API.md)** | **[🇮🇹 Italiano](API.it.md)**
 
-> **Moved:** the endpoints below are now served under **`/api/v2/system`** (e.g. `/api/v2/system/status`) and require broker credentials (`Authorization: Bearer` or `X-API-Key`); changes need a superadmin. The WebSocket on port 3001 was replaced by the authenticated stream `/api/v2/stream`. Entities, subscriptions, history and commands are documented in the [broker guide](./Broker.md).
+> **Moved:** the endpoints below are now served under **`/api/v1/system`** (e.g. `/api/v1/system/status`) and require broker credentials (`Authorization: Bearer` or `X-API-Key`); changes need a superadmin. The WebSocket on port 3001 was replaced by the authenticated stream `/api/v1/stream`. Entities, subscriptions, history and commands are documented in the [broker guide](./Broker.md).
 
 ---
 

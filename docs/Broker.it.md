@@ -32,7 +32,7 @@ L'Universal Data Connector è un **context broker standalone**: legge i disposit
                        ┌──────────────────────────────────┼─────────────────────────────┐
                        ▼                                  ▼                             ▼
               SubscriptionEngine                      StreamHub                 (ogni istanza)
-              (partizioni possedute)          WebSocket /api/v2/stream
+              (partizioni possedute)          WebSocket /api/v1/stream
                        │
                        ▼
           coda UDC_NOTIFY (JetStream, at-least-once) ─► DeliveryWorker ─► HTTP / MQTT / NATS / WebSocket
@@ -109,7 +109,7 @@ La UI è su **http://localhost:8080**: nginx inoltra `/api` e lo stream WebSocke
 
 ## API
 
-Tutte le route sono sotto `/api/v2`.
+Tutte le route sono sotto `/api/v1`.
 
 **Autenticazione**
 - `Authorization: Bearer <jwt>` per gli utenti, oppure `X-API-Key: <key>` per le macchine.
@@ -130,7 +130,7 @@ Tutte le route sono sotto `/api/v2`.
 | Subscription | `GET`/`POST /subscriptions`, `GET`/`PATCH`/`DELETE /subscriptions/:id`, `POST /:id/pause`, `POST /:id/resume`, `POST /:id/test`, `DELETE /:id/stats`, `GET /:id/dlq`, `POST /:id/dlq/replay`, `DELETE /:id/dlq`, `POST /subscriptions/preview`, `POST /expressions/validate` |
 | Amministrazione | `/users` (superadmin), `/tenants`, `/tenants/:id/members`, `/apikeys`, `GET /cluster` (superadmin) |
 | Sistema | `/system/*`: connettori, mapping, configurazione storage, stato del motore. Lettura per tutti gli autenticati, modifiche solo per il superadmin. Ha sostituito la vecchia `/api`. |
-| Stream | `ws://host/api/v2/stream?access_token=…&tenant=…` |
+| Stream | `ws://host/api/v1/stream?access_token=…&tenant=…` |
 
 ## Subscription
 
@@ -213,7 +213,7 @@ La valutazione non lancia mai errori: tipi incompatibili rendono falso il confro
 ## Stream in tempo reale
 
 ```
-ws://host/api/v2/stream?access_token=<jwt>&tenant=<id>      (oppure api_key=<key>)
+ws://host/api/v1/stream?access_token=<jwt>&tenant=<id>      (oppure api_key=<key>)
 → { "type": "subscribe", "id": "live", "entities": { "types": ["Press"], "idPattern": "plant1:*" } }
 → { "type": "subscribe", "id": "n1", "subscription": "<uuid di una subscription websocket>" }
 ← { "type": "welcome" } · { "type": "entity", "sub": "live", "op": "update", "entity": {...} } · { "type": "notification", "sub": "n1", ... }

@@ -62,7 +62,7 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           readinessProbe:
-            httpGet: { path: /api/v2/health, port: http }
+            httpGet: { path: /api/v1/health, port: http }
             periodSeconds: 5
             failureThreshold: 3
           livenessProbe:

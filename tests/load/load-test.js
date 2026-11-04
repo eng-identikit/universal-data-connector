@@ -6,7 +6,7 @@
  *
  *   node tests/load/load-test.js --password <admin password> [options]
  *
- *   --base        API base (default http://localhost:8080/api/v2, the UI nginx)
+ *   --base        API base (default http://localhost:8080/api/v1, the UI nginx)
  *   --entities    entities to create (default 100000), spread over 100 types
  *   --rate        updates per second (default 10000)
  *   --duration    seconds of sustained load (default 60)
@@ -26,7 +26,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((acc, a, i, all) =>
   if (a.startsWith('--')) acc.push([a.slice(2), all[i + 1]]);
   return acc;
 }, []));
-const BASE = args.base || 'http://localhost:8080/api/v2';
+const BASE = args.base || 'http://localhost:8080/api/v1';
 const ENTITIES = Number(args.entities || 100000);
 const RATE = Number(args.rate || 10000);
 const DURATION = Number(args.duration || 60);

@@ -14,9 +14,9 @@ const Broker = require('./broker/Broker');
 /**
  * Universal Data Connector: connector engine + context broker.
  *
- *   /api/v2          broker API (entities, subscriptions, history, commands, admin)
- *   /api/v2/stream   authenticated realtime WebSocket
- *   /api/v2/system   connectors, mapping, storage and engine status
+ *   /api/v1          broker API (entities, subscriptions, history, commands, admin)
+ *   /api/v1/stream   authenticated realtime WebSocket
+ *   /api/v1/system   connectors, mapping, storage and engine status
  */
 class UniversalDataConnector {
   constructor(storageConfig = null) {
@@ -33,7 +33,7 @@ class UniversalDataConnector {
       // Setup Express middleware
       this.setupMiddleware();
 
-      // Broker: connects in background, /api/v2 answers 503 until ready
+      // Broker: connects in background, /api/v1 answers 503 until ready
       this.broker.start();
 
       // Initialize configuration
@@ -107,10 +107,10 @@ class UniversalDataConnector {
     });
 
     // Connector engine API (must be mounted before the broker router and its 404)
-    this.app.use('/api/v2/system', ...this.broker.systemMiddleware(), systemRoutes);
+    this.app.use('/api/v1/system', ...this.broker.systemMiddleware(), systemRoutes);
 
     // Broker API
-    this.app.use('/api/v2', this.broker.router);
+    this.app.use('/api/v1', this.broker.router);
 
     // 404 handler
     this.app.use('*', (req, res) => {
@@ -156,9 +156,9 @@ class UniversalDataConnector {
 
       this.server = this.app.listen(this.port, () => {
         logger.info(`Universal Data Connector listening on port ${this.port}`);
-        logger.info(`  Broker API:  http://localhost:${this.port}/api/v2`);
-        logger.info(`  Stream:      ws://localhost:${this.port}/api/v2/stream`);
-        logger.info(`  System API:  http://localhost:${this.port}/api/v2/system`);
+        logger.info(`  Broker API:  http://localhost:${this.port}/api/v1`);
+        logger.info(`  Stream:      ws://localhost:${this.port}/api/v1/stream`);
+        logger.info(`  System API:  http://localhost:${this.port}/api/v1/system`);
       });
       this.broker.attach(this.server);
 

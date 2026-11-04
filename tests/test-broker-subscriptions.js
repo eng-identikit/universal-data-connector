@@ -86,11 +86,11 @@ async function main() {
   const broker = new Broker();
   const app = express();
   app.use(express.json());
-  app.use('/api/v2', broker.router);
+  app.use('/api/v1', broker.router);
   const server = app.listen(0);
   broker.attach(server);
   const port = server.address().port;
-  base = `http://127.0.0.1:${port}/api/v2`;
+  base = `http://127.0.0.1:${port}/api/v1`;
 
   await broker.start();
   if (!broker.ready) {
@@ -230,7 +230,7 @@ async function main() {
 
   await test('stream delivers entity changes and websocket-channel notifications', async () => {
     const wsSub = await createSub({ name: 'ws', select: { ids: ['s1'] }, notify: { channel: 'websocket' } });
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/v2/stream?access_token=${token}&tenant=${TENANT}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/stream?access_token=${token}&tenant=${TENANT}`);
     const messages = [];
     ws.on('message', d => messages.push(JSON.parse(d)));
     await waitFor(() => messages.some(m => m.type === 'welcome'), 3000, 'welcome');
@@ -245,7 +245,7 @@ async function main() {
     assert.strictEqual(messages.find(m => m.type === 'notification').notification.subscriptionId, wsSub.id);
     ws.close();
 
-    const denied = new WebSocket(`ws://127.0.0.1:${port}/api/v2/stream?access_token=bad`);
+    const denied = new WebSocket(`ws://127.0.0.1:${port}/api/v1/stream?access_token=bad`);
     const code = await new Promise(r => denied.on('close', c => r(c)));
     assert.strictEqual(code, 4001);
   });

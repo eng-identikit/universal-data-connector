@@ -36,11 +36,11 @@ const RETRY_INTERVAL_MS = 5000;
 
 /**
  * Context broker: entity store, subscriptions, notifications, realtime stream,
- * users/tenants/API keys and the /api/v2 router.
+ * users/tenants/API keys and the /api/v1 router.
  *
  * start() does not block server startup: until PostgreSQL (and NATS, when
  * NATS_URL is set) are reachable it keeps retrying in the background and
- * /api/v2 answers 503.
+ * /api/v1 answers 503.
  */
 class Broker {
   constructor() {
@@ -202,7 +202,7 @@ class Broker {
   }
 
   /**
-   * Guard for /api/v2/system (connectors, mapping, storage, engine status):
+   * Guard for /api/v1/system (connectors, mapping, storage, engine status):
    * global infrastructure shared by all tenants, so any authenticated caller
    * may read and only a superadmin may change it.
    */
@@ -233,7 +233,7 @@ class Broker {
     return m;
   }
 
-  /** Middleware chain for /api/v2/system: auth guard, plus config sharing in a cluster. */
+  /** Middleware chain for /api/v1/system: auth guard, plus config sharing in a cluster. */
   systemMiddleware() {
     const chain = [this.systemGuard()];
     if (this.configSync) chain.push(this.configSync.middleware());

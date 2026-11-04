@@ -68,14 +68,14 @@ async function startInstance() {
   const broker = new Broker();
   const app = express();
   app.use(express.json());
-  app.use('/api/v2', broker.router);
+  app.use('/api/v1', broker.router);
   const server = app.listen(0);
   broker.attach(server);
   const engine = new FakeEngine(['plc-a', 'plc-b', 'plc-c']);
   broker.attachEngine(engine);
   await broker.start();
   if (!broker.ready) throw new Error(`Broker not ready: ${broker.lastError}`);
-  return { broker, server, engine, base: `http://127.0.0.1:${server.address().port}/api/v2` };
+  return { broker, server, engine, base: `http://127.0.0.1:${server.address().port}/api/v1` };
 }
 
 async function main() {

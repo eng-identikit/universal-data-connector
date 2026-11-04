@@ -3,7 +3,7 @@
 #   mqtt  Mosquitto: default broker for MQTT notification channels and MQTT connectors
 # Pick them with COMPOSE_PROFILES in .env (e.g. COMPOSE_PROFILES=nats,mqtt or empty), then:
 #   docker compose up -d --build
-# UI: http://localhost:8080   API: http://localhost:3000/api/v2
+# UI: http://localhost:8080   API: http://localhost:3000/api/v1
 # Credentials and secrets come from .env (see .env.example).
 
 services:

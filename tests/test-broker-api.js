@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Broker - /api/v2 integration tests.
+ * Broker - /api/v1 integration tests.
  * Requires PostgreSQL configured through BROKER_DB_* (e.g. `docker compose up -d db`).
  * Mounts the broker in-process on a random port and works in a throw-away tenant.
  */
@@ -55,9 +55,9 @@ async function main() {
   const broker = new Broker();
   const app = express();
   app.use(express.json());
-  app.use('/api/v2', broker.router);
+  app.use('/api/v1', broker.router);
   const server = app.listen(0);
-  base = `http://127.0.0.1:${server.address().port}/api/v2`;
+  base = `http://127.0.0.1:${server.address().port}/api/v1`;
 
   await broker.start();
   if (!broker.ready) {

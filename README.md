@@ -16,7 +16,7 @@ UDC is also a standalone **context broker**:
 
 ```bash
 cp .env.example .env          # set BROKER_JWT_SECRET and BROKER_ADMIN_PASSWORD
-docker compose up -d --build  # UI on http://localhost:8080, API on /api/v2
+docker compose up -d --build  # UI on http://localhost:8080, API on /api/v1
 ```
 
 Full guide: [Context broker](./docs/Broker.md) (architecture, API, subscriptions, cluster, Helm, configuration, performance).
@@ -182,7 +182,7 @@ Details: [Storage Guide](./docs/Storage.md), [History endpoints](./docs/API.md#h
 
 ### 6. **Real-time Stream (WebSocket)**
 
-Entity changes are pushed over an authenticated WebSocket on the API port (`/api/v2/stream?access_token=…&tenant=…`). Clients subscribe to entity filters or to websocket-channel subscriptions:
+Entity changes are pushed over an authenticated WebSocket on the API port (`/api/v1/stream?access_token=…&tenant=…`). Clients subscribe to entity filters or to websocket-channel subscriptions:
 
 ```json
 { "type": "subscribe", "id": "live", "entities": { "types": ["Press"], "idPattern": "plant1:*" } }
@@ -431,7 +431,7 @@ const stats = engine.getStatistics();
 ## 📖 Further Resources
 
 - [Context broker](./docs/Broker.md): entities, subscriptions, history, commands, cluster, deployment
-- [API Documentation](./docs/API.md) (connector engine endpoints, now under `/api/v2/system`)
+- [API Documentation](./docs/API.md) (connector engine endpoints, now under `/api/v1/system`)
 - [Configuration Guide](./docs/Configuration.md)
 - [Dynamic Configuration](./docs/DynamicConfiguration.md)
 - [Mapping Guide](./docs/Mapping.md)

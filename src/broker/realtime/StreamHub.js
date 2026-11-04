@@ -3,15 +3,15 @@ const logger = require('../../utils/logger');
 const { resolveCaller, resolveTenant } = require('../auth/middleware');
 const { globRegex } = require('../subscriptions/SubscriptionEngine');
 
-const PATH = '/api/v2/stream';
+const PATH = '/api/v1/stream';
 const MAX_BUFFERED_BYTES = 5 * 1024 * 1024;
 const MAX_CLIENT_SUBSCRIPTIONS = 50;
 const PING_MS = 30000;
 
 /**
- * Authenticated WebSocket stream on /api/v2/stream.
+ * Authenticated WebSocket stream on /api/v1/stream.
  *
- * Connect: ws://host/api/v2/stream?access_token=<jwt>&tenant=<id>   (or api_key=<key>)
+ * Connect: ws://host/api/v1/stream?access_token=<jwt>&tenant=<id>   (or api_key=<key>)
  * Client → server:
  *   { type: 'subscribe', id, entities: { types?, idPattern?, ids? } }   live entity changes
  *   { type: 'subscribe', id, subscription: '<uuid>' }                  notifications of a websocket-channel subscription

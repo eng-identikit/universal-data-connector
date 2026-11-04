@@ -7,7 +7,7 @@ const configManager = require('../../config/ConfigManager');
  * instance of a cluster. PostgreSQL (system_config) holds the shared copy:
  *
  *   - at startup the database copy wins; an empty database is seeded from the files
- *   - after a successful change through /api/v2/system, or an auto-discovery
+ *   - after a successful change through /api/v1/system, or an auto-discovery
  *     save of mapping.json, the local file is pushed and the other instances
  *     are told (control message) to pull it and reload
  */
@@ -69,7 +69,7 @@ class ConfigSync {
     }
   }
 
-  /** Express middleware for /api/v2/system: pushes the affected file after a successful change. */
+  /** Express middleware for /api/v1/system: pushes the affected file after a successful change. */
   middleware() {
     return (req, res, next) => {
       if (req.method !== 'GET') {
