@@ -74,6 +74,8 @@ class DataStore {
 
   async connectExternal() {
     const adapter = StorageFactory.create(this.storageConfig.type, this.storageConfig.config || {});
+    // Adapters already log errors; without a listener an 'error' event would crash the process
+    adapter.on('error', () => {});
     try {
       await adapter.initialize();
       await adapter.connect();

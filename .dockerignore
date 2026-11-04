@@ -1,0 +1,8 @@
+node_modules
+logs
+certificates
+tests
+docs
+.git
+.env
+.vscode

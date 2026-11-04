@@ -11,6 +11,7 @@ const apiRoutes = require('./api');
 const mappingRoutes = require('./api/routes/mapping');
 const configManager = require('./config/ConfigManager');
 const storageConfigManager = require('./config/StorageConfigManager');
+const Broker = require('./broker/Broker');
 
 class UniversalDataConnector {
   constructor(storageConfig = null) {
@@ -22,12 +23,16 @@ class UniversalDataConnector {
     this.port = process.env.PORT || 3000;
     this.wsPort = process.env.WS_PORT || 3001;
     this.storageConfig = storageConfig;
+    this.broker = new Broker();
   }
 
   async initialize() {
     try {
       // Setup Express middleware
       this.setupMiddleware();
+
+      // Broker entity store: connects in background, /api/v2 answers 503 until ready
+      this.broker.start();
 
       // Initialize configuration
       await configManager.initialize();
@@ -67,7 +72,7 @@ class UniversalDataConnector {
   setupMiddleware() {
     this.app.use(helmet());
     this.app.use(cors());
-    this.app.use(express.json());
+    this.app.use(express.json({ limit: process.env.BODY_LIMIT || '5mb' }));
     this.app.use(express.urlencoded({ extended: true }));
 
     // Request logging
@@ -93,8 +98,11 @@ class UniversalDataConnector {
       });
     });
 
-    // API routes
-    this.app.use('/api', apiRoutes);
+    // Broker API (must be mounted before the legacy /api router)
+    this.app.use('/api/v2', this.broker.router);
+
+    // Legacy API, protected by broker authentication until it is replaced
+    this.app.use('/api', this.broker.legacyGuard(), apiRoutes);
 
     // 404 handler
     this.app.use('*', (req, res) => {
@@ -292,6 +300,8 @@ class UniversalDataConnector {
       if (this.server) {
         this.server.close();
       }
+
+      await this.broker.stop();
 
       logger.info('Universal Data Connector stopped successfully');
     } catch (error) {
