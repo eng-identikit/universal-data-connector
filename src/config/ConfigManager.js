@@ -2,16 +2,21 @@ const fs = require('fs').promises;
 const path = require('path');
 const Joi = require('joi');
 const logger = require('../utils/logger');
+const ConnectorFactory = require('../connectors/ConnectorFactory');
 
 // Schema per validazione configurazione sources
 const sourceConfigSchema = Joi.object({
   sources: Joi.array().items(
     Joi.object({
       id: Joi.string().required(),
-      type: Joi.string().valid('opcua', 'mqtt', 'http', 'modbus', 'i3x', 'dds').required(),
+      type: Joi.string().valid(...ConnectorFactory.getSupportedTypes()).required(),
       enabled: Joi.boolean().default(true),
       name: Joi.string().optional(),
       description: Joi.string().optional(),
+      // Broker tenant receiving this source's devices as entities
+      tenant: Joi.string().pattern(/^[a-z0-9][a-z0-9_-]{0,62}$/).default('default'),
+      // Optional prefix for the entity ids of this source's devices
+      entityIdPrefix: Joi.string().max(64).allow('').optional(),
       config: Joi.object().required(),
       tags: Joi.array().items(
         Joi.object({

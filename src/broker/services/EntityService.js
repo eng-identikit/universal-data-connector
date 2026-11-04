@@ -18,9 +18,10 @@ const ORDER_COLUMNS = { id: 'id', type: 'type', createdAt: 'created_at', updated
  * after each committed write.
  */
 class EntityService extends EventEmitter {
-  constructor(pool) {
+  constructor(pool, { history = null } = {}) {
     super();
     this.pool = pool;
+    this.history = history;
   }
 
   // ─── Reads ────────────────────────────────────────────────────────────────
@@ -293,7 +294,9 @@ class EntityService extends EventEmitter {
     );
     if (!rows.length) throw conflict(`Entity '${entity.id}' already exists`);
     await this._syncRelationships(client, tenant, entity.id, [], model.extractRelationships(entity.attrs));
-    return toEntity(rows[0]);
+    const created = toEntity(rows[0]);
+    if (this.history) await this.history.insert(client, tenant, this.history.rows(tenant, null, created));
+    return created;
   }
 
   async _write(client, tenant, existing, next) {
@@ -306,7 +309,81 @@ class EntityService extends EventEmitter {
       client, tenant, existing.id,
       model.extractRelationships(existing.attrs), model.extractRelationships(next.attrs)
     );
-    return toEntity(rows[0]);
+    const updated = toEntity(rows[0]);
+    if (this.history) await this.history.insert(client, tenant, this.history.rows(tenant, existing, updated));
+    return updated;
+  }
+
+  /**
+   * High-throughput upsert used by connectors and /ingest: one transaction,
+   * two statements for the whole batch. Attributes are merged like PATCH;
+   * entities whose state would not change are skipped (no version bump, no event).
+   * Invalid items are reported in `rejected` instead of failing the batch.
+   *
+   * updates: [{ id, type, attrs, location? }]  (type is used only on create)
+   */
+  async ingestBatch(tenant, updates, { allowedTypes = null } = {}) {
+    // Last update wins when the same entity appears twice in a batch
+    const byId = new Map();
+    for (const u of updates) {
+      const prev = byId.get(u.id);
+      byId.set(u.id, prev ? { ...prev, ...u, attrs: { ...prev.attrs, ...u.attrs } } : u);
+    }
+    const ids = [...byId.keys()].sort();
+    const now = nowIso();
+    const rejected = [];
+
+    const events = await withTransaction(this.pool, async client => {
+      const { rows } = await client.query(
+        'SELECT * FROM entities WHERE tenant = $1 AND id = ANY($2) ORDER BY id FOR UPDATE', [tenant, ids]
+      );
+      const existing = new Map(rows.map(r => [r.id, toEntity(r)]));
+
+      const writes = [];
+      for (const id of ids) {
+        const u = byId.get(id);
+        const before = existing.get(id) || null;
+        try {
+          const type = before ? before.type : u.type;
+          if (allowedTypes && !allowedTypes.includes(type)) throw forbidden(`type '${type}' not allowed`);
+          const next = before
+            ? model.applyPatch(before, { attrs: u.attrs, ...(u.location !== undefined && { location: u.location }) }, now)
+            : model.normalizeEntity({ id, type: u.type, attrs: u.attrs, location: u.location }, now);
+          if (before && JSON.stringify(next.attrs) === JSON.stringify(before.attrs)
+            && JSON.stringify(next.location ?? null) === JSON.stringify(before.location ?? null)) continue;
+          writes.push({ before, next: { ...next, type } });
+        } catch (error) {
+          rejected.push({ id, error: error.message });
+        }
+      }
+      if (!writes.length) return [];
+
+      const { rows: saved } = await client.query(
+        `INSERT INTO entities AS e (tenant, id, type, attrs, location)
+         SELECT $1, i, t, a, l FROM unnest($2::text[], $3::text[], $4::jsonb[], $5::jsonb[]) AS x(i, t, a, l)
+         ON CONFLICT (tenant, id) DO UPDATE
+           SET attrs = EXCLUDED.attrs, location = EXCLUDED.location, version = e.version + 1, updated_at = now()
+         RETURNING *`,
+        [tenant, writes.map(w => w.next.id), writes.map(w => w.next.type),
+          writes.map(w => JSON.stringify(w.next.attrs)), writes.map(w => (w.next.location ? JSON.stringify(w.next.location) : null))]
+      );
+      const savedById = new Map(saved.map(r => [r.id, toEntity(r)]));
+
+      const historyRows = [];
+      const out = [];
+      for (const w of writes) {
+        const entity = savedById.get(w.next.id);
+        const relsBefore = w.before ? model.extractRelationships(w.before.attrs) : [];
+        await this._syncRelationships(client, tenant, entity.id, relsBefore, model.extractRelationships(entity.attrs));
+        if (this.history) historyRows.push(...this.history.rows(tenant, w.before, entity));
+        out.push([w.before ? 'update' : 'create', entity, w.before]);
+      }
+      if (this.history) await this.history.insert(client, tenant, historyRows);
+      return out;
+    });
+
+    events.forEach(([op, entity, previous]) => this._emit(tenant, op, entity, previous));
+    return { written: events.length, skipped: ids.length - events.length - rejected.length, rejected };
   }
 
   async _syncRelationships(client, tenant, id, before, after) {

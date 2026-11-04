@@ -14,9 +14,8 @@ COPY src ./src
 COPY config ./config
 
 ENV NODE_ENV=production \
-    PORT=3000 \
-    WS_PORT=3001
+    PORT=3000
 
-EXPOSE 3000 3001
+EXPOSE 3000
 USER node
 CMD ["node", "src/server.js"]

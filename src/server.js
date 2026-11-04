@@ -1,27 +1,29 @@
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const { createServer } = require('http');
-const WebSocket = require('ws');
 require('dotenv').config();
 
 const logger = require('./utils/logger');
 const DataConnectorEngine = require('./core/DataConnectorEngine');
-const apiRoutes = require('./api');
+const systemRoutes = require('./api');
 const mappingRoutes = require('./api/routes/mapping');
 const configManager = require('./config/ConfigManager');
 const storageConfigManager = require('./config/StorageConfigManager');
 const Broker = require('./broker/Broker');
 
+/**
+ * Universal Data Connector: connector engine + context broker.
+ *
+ *   /api/v2          broker API (entities, subscriptions, history, commands, admin)
+ *   /api/v2/stream   authenticated realtime WebSocket
+ *   /api/v2/system   connectors, mapping, storage and engine status
+ */
 class UniversalDataConnector {
   constructor(storageConfig = null) {
     this.app = express();
     this.server = null;
-    this.wsServer = null;
     this.engine = null;
-    this.dataCounter = 0;
     this.port = process.env.PORT || 3000;
-    this.wsPort = process.env.WS_PORT || 3001;
     this.storageConfig = storageConfig;
     this.broker = new Broker();
   }
@@ -31,7 +33,7 @@ class UniversalDataConnector {
       // Setup Express middleware
       this.setupMiddleware();
 
-      // Broker entity store: connects in background, /api/v2 answers 503 until ready
+      // Broker: connects in background, /api/v2 answers 503 until ready
       this.broker.start();
 
       // Initialize configuration
@@ -39,7 +41,9 @@ class UniversalDataConnector {
 
       // Storage from config/storage.json unless explicitly passed to the constructor.
       // If it is unreachable the data store runs in memory and retries in background.
-      let storageConfig = this.storageConfig;
+      // UDC_RAW_STORAGE=memory skips storage.json (entity history is kept by the broker anyway).
+      let storageConfig = this.storageConfig
+        || (process.env.UDC_RAW_STORAGE === 'memory' ? { type: 'memory', config: {} } : null);
       if (!storageConfig) {
         try {
           await storageConfigManager.initialize();
@@ -53,14 +57,17 @@ class UniversalDataConnector {
       this.engine = new DataConnectorEngine(storageConfig);
       await this.engine.initialize();
 
+      // Devices read by the connectors become broker entities
+      this.broker.attachEngine(this.engine);
+      this.engine.on('sourceStatusChanged', (sourceId, status) => {
+        logger.info(`Source '${sourceId}' status: ${status}`);
+      });
+
       // Initialize mapping routes with engine instance PRIMA di setup routes
       mappingRoutes.initialize(this.engine);
 
       // Setup routes DOPO l'inizializzazione
       this.setupRoutes();
-
-      // Setup WebSocket server for real-time data
-      this.setupWebSocket();
 
       logger.info('Universal Data Connector initialized successfully');
     } catch (error) {
@@ -94,15 +101,16 @@ class UniversalDataConnector {
       res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
-        uptime: process.uptime()
+        uptime: process.uptime(),
+        broker: this.broker.status()
       });
     });
 
-    // Broker API (must be mounted before the legacy /api router)
-    this.app.use('/api/v2', this.broker.router);
+    // Connector engine API (must be mounted before the broker router and its 404)
+    this.app.use('/api/v2/system', this.broker.systemGuard(), systemRoutes);
 
-    // Legacy API, protected by broker authentication until it is replaced
-    this.app.use('/api', this.broker.legacyGuard(), apiRoutes);
+    // Broker API
+    this.app.use('/api/v2', this.broker.router);
 
     // 404 handler
     this.app.use('*', (req, res) => {
@@ -120,112 +128,6 @@ class UniversalDataConnector {
         message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
       });
     });
-  }
-
-  setupWebSocket() {
-    this.wsServer = new WebSocket.Server({ port: this.wsPort });
-
-    this.wsServer.on('connection', (ws) => {
-      logger.info('WebSocket client connected');
-
-      ws.on('message', (message) => {
-        try {
-          const data = JSON.parse(message);
-          this.handleWebSocketMessage(ws, data);
-        } catch (error) {
-          logger.error('Invalid WebSocket message:', error);
-          ws.send(JSON.stringify({ error: 'Invalid message format' }));
-        }
-      });
-
-      ws.on('close', () => {
-        logger.info('WebSocket client disconnected');
-      });
-
-      // Send welcome message
-      ws.send(JSON.stringify({
-        type: 'welcome',
-        message: 'Connected to Universal Data Connector',
-        timestamp: new Date().toISOString()
-      }));
-    });
-
-    // Subscribe to engine data events
-    if (this.engine) {
-      /* this.engine.on('data', (data) => {
-        this.broadcastToWebSocketClients({
-          type: 'data',
-          payload: data,
-          timestamp: new Date().toISOString()
-        });
-      }); */
-
-      /* this.engine.on('sourceStatusChanged', (sourceId, status) => {
-        this.broadcastToWebSocketClients({
-          type: 'sourceStatus',
-          sourceId,
-          status,
-          timestamp: new Date().toISOString()
-        });
-      }); */
-
-      this.engine.on('data', (data) => {
-        // 🎯 STAMPA FINALE DATI MAPPATI A VIDEO
-        this.dataCounter++;
-        console.log('\n' + '='.repeat(80));
-        console.log(`📊 DATI MAPPATI #${this.dataCounter} - ${new Date().toISOString()}`);
-        console.log('='.repeat(80));
-        console.log(`🔹 Sorgente: ${data.sourceId}`);
-        console.log(`🔹 Timestamp: ${data.timestamp}`);
-        console.log(`\n📥 DATI ORIGINALI ( ${data.sourceId} ):`);
-        console.log(JSON.stringify(data.originalData, null, 2));
-        console.log('\n✅ DATI MAPPATI:');
-        console.log(JSON.stringify(data.mappedData, null, 2));
-        console.log('='.repeat(80) + '\n');
-
-        this.broadcastToWebSocketClients({
-          type: 'data',
-          payload: data,
-          timestamp: new Date().toISOString()
-        });
-      });
-
-      this.engine.on('sourceStatusChanged', (sourceId, status) => {
-        logger.info(`🔄 Cambio stato sorgente '${sourceId}': ${status}`);
-
-        this.broadcastToWebSocketClients({
-          type: 'sourceStatus',
-          sourceId,
-          status,
-          timestamp: new Date().toISOString()
-        });
-      });
-    }
-
-    logger.info(`WebSocket server listening on port ${this.wsPort}`);
-  }
-
-  handleWebSocketMessage(ws, data) {
-    switch (data.type) {
-      case 'subscribe':
-        // Handle subscription to specific data sources
-        ws.subscriptions = ws.subscriptions || [];
-        if (data.sourceId && !ws.subscriptions.includes(data.sourceId)) {
-          ws.subscriptions.push(data.sourceId);
-        }
-        break;
-
-      case 'unsubscribe':
-        ws.subscriptions = ws.subscriptions || [];
-        const index = ws.subscriptions.indexOf(data.sourceId);
-        if (index > -1) {
-          ws.subscriptions.splice(index, 1);
-        }
-        break;
-
-      default:
-        ws.send(JSON.stringify({ error: 'Unknown message type' }));
-    }
   }
 
   // Method to get engine instance for API access
@@ -248,34 +150,18 @@ class UniversalDataConnector {
     return await this.engine.reloadStorageConfiguration(newStorageConfig);
   }
 
-  broadcastToWebSocketClients(message) {
-    this.wsServer.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN) {
-        // Check if client is subscribed to this source
-        if (!message.sourceId || !client.subscriptions ||
-          client.subscriptions.includes(message.sourceId)) {
-          client.send(JSON.stringify(message));
-        }
-      }
-    });
-  }
-
   async start() {
     try {
       await this.initialize();
 
       this.server = this.app.listen(this.port, () => {
-        console.log('\n' + '█'.repeat(80));
-        console.log('  🚀 UNIVERSAL DATA CONNECTOR - AVVIATO');
-        console.log('█'.repeat(80));
-        logger.info(`Universal Data Connector API server listening on port ${this.port}`);
-        logger.info('Available endpoints:');
-        logger.info(`  Health Check: http://localhost:${this.port}/health`);
-        logger.info(`  API Base: http://localhost:${this.port}/api`);
-        logger.info(`  WebSocket: ws://localhost:${this.wsPort}`);
-        console.log('█'.repeat(80));
+        logger.info(`Universal Data Connector listening on port ${this.port}`);
+        logger.info(`  Broker API:  http://localhost:${this.port}/api/v2`);
+        logger.info(`  Stream:      ws://localhost:${this.port}/api/v2/stream`);
+        logger.info(`  System API:  http://localhost:${this.port}/api/v2/system`);
       });
       this.broker.attach(this.server);
+
       // Start the data connector engine
       await this.engine.start();
 
@@ -294,10 +180,6 @@ class UniversalDataConnector {
         await this.engine.stop();
       }
 
-      if (this.wsServer) {
-        this.wsServer.close();
-      }
-
       if (this.server) {
         this.server.close();
       }
@@ -309,10 +191,6 @@ class UniversalDataConnector {
       logger.error('Error stopping Universal Data Connector:', error);
       throw error;
     }
-  }
-
-  getEngine() {
-    return this.engine;
   }
 }
 

@@ -10,6 +10,7 @@ const EntityService = require('./services/EntityService');
 const UserService = require('./services/UserService');
 const TenantService = require('./services/TenantService');
 const ApiKeyService = require('./services/ApiKeyService');
+const HistoryService = require('./services/HistoryService');
 const SubscriptionService = require('./subscriptions/SubscriptionService');
 const SubscriptionEngine = require('./subscriptions/SubscriptionEngine');
 const NatsClient = require('./messaging/NatsClient');
@@ -18,10 +19,14 @@ const { JetStreamQueue, MemoryQueue } = require('./messaging/WorkQueue');
 const Channels = require('./notify/channels');
 const DeliveryWorker = require('./notify/DeliveryWorker');
 const StreamHub = require('./realtime/StreamHub');
+const IngestService = require('./ingest/IngestService');
+const ConnectorBridge = require('./ingest/ConnectorBridge');
+const CommandService = require('./commands/CommandService');
 const authRoutes = require('./api/authRoutes');
 const adminRoutes = require('./api/adminRoutes');
 const entityRoutes = require('./api/entityRoutes');
 const subscriptionRoutes = require('./api/subscriptionRoutes');
+const dataRoutes = require('./api/dataRoutes');
 
 const RETRY_INTERVAL_MS = 5000;
 
@@ -41,13 +46,16 @@ class Broker {
     this.nats = new NatsClient();
     this.bus = new ChangeBus(this.nats, this.instanceId);
 
+    const history = new HistoryService(this.pool);
     this.services = {
-      entities: new EntityService(this.pool),
+      history,
+      entities: new EntityService(this.pool, { history }),
       users: new UserService(this.pool),
       tenants: new TenantService(this.pool),
       apiKeys: new ApiKeyService(this.pool),
       subscriptions: new SubscriptionService(this.pool)
     };
+    this.services.commands = new CommandService({ pool: this.pool, entities: this.services.entities, natsClient: this.nats });
 
     this.notifyQueue = this.nats.enabled
       ? new JetStreamQueue(this.nats, { stream: 'UDC_NOTIFY', durable: 'udc-delivery' })
@@ -58,6 +66,13 @@ class Broker {
       queue: this.notifyQueue,
       bus: this.bus
     });
+    this.ingest = new IngestService({
+      entities: this.services.entities,
+      queue: this.nats.enabled
+        ? new JetStreamQueue(this.nats, { stream: 'UDC_INGEST', durable: 'udc-ingest' })
+        : new MemoryQueue({ name: 'ingest' })
+    });
+    this.bridge = new ConnectorBridge({ ingest: this.ingest });
     this.hub = new StreamHub({ services: this.services, bus: this.bus, natsClient: this.nats });
     this.channels = new Channels({ natsClient: this.nats, hub: this.hub });
     this.worker = new DeliveryWorker({
@@ -89,12 +104,14 @@ class Broker {
       if (!this.dbReady) {
         await migrate(this.pool);
         await this.services.users.bootstrap();
+        await this.services.history.configureRetention();
         this.dbReady = true;
       }
       if (!this.messagingReady) {
         await this.nats.connect();
         this.bus.start();
         await this.worker.start();
+        await this.ingest.start();
         await this.engine.start();
         this.messagingReady = true;
       }
@@ -113,11 +130,20 @@ class Broker {
     this.hub.attach(server);
   }
 
+  /** Connects the connector engine: devices become entities, commands reach connectors. */
+  attachEngine(engine) {
+    this.bridge.attach(engine);
+    this.services.commands.attach(engine);
+  }
+
   async stop() {
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    await this.ingest.stop().catch(() => {});
     await this.engine.stop().catch(() => {});
+    this.services.commands.close();
     this.notifyQueue.stop();
+    this.ingest.queue.stop();
     this.hub.close();
     this.bus.stop();
     await this.channels.close();
@@ -136,10 +162,11 @@ class Broker {
   }
 
   /**
-   * Guard for the legacy /api routes until they are replaced (phase 3):
-   * any authenticated caller may read, only a superadmin may change configuration.
+   * Guard for /api/v2/system (connectors, mapping, storage, engine status):
+   * global infrastructure shared by all tenants, so any authenticated caller
+   * may read and only a superadmin may change it.
    */
-  legacyGuard() {
+  systemGuard() {
     return (req, res, next) => {
       if (!this.ready) return res.status(503).json({ error: 'Unavailable', message: 'Broker is starting' });
       this.authenticate(req, res, (error) => {
@@ -167,6 +194,7 @@ class Broker {
     router.use(auth);
     router.use(entityRoutes(deps));
     router.use(subscriptionRoutes(deps));
+    router.use(dataRoutes(deps));
     router.use(adminRoutes(deps));
 
     router.use((req, res) => res.status(404).json({ error: 'NotFound', message: `No route for ${req.method} ${req.originalUrl}` }));

@@ -1,6 +1,21 @@
 const BaseMapper = require('../BaseMapper');
 const logger = require('../../utils/logger');
 
+// MqttConnector emits { topic, data }; other producers use { topic, payload }
+function payloadKey(sourceData) {
+  return sourceData.payload !== undefined ? 'payload' : 'data';
+}
+
+function parsedPayload(sourceData) {
+  const payload = sourceData[payloadKey(sourceData)];
+  if (typeof payload !== 'string') return payload;
+  try {
+    return JSON.parse(payload);
+  } catch (e) {
+    return payload;
+  }
+}
+
 /**
  * MQTTMapper - Maps MQTT data to new unified format
  */
@@ -25,15 +40,8 @@ class MQTTMapper extends BaseMapper {
     const measurements = [];
     const metadata = this.extractMetadata(sourceData, context);
 
-    // Parse MQTT payload
-    let payload = sourceData.payload;
-    if (typeof payload === 'string') {
-      try {
-        payload = JSON.parse(payload);
-      } catch (e) {
-        // Keep as string if not JSON
-      }
-    }
+    // Parse MQTT payload (kept as string if not JSON)
+    const payload = parsedPayload(sourceData);
 
     // Extract measurements from payload
     if (typeof payload === 'object' && payload !== null) {
@@ -78,14 +86,8 @@ class MQTTMapper extends BaseMapper {
     const measurements = [];
 
     // Parse payload for discovery
-    let payload = sourceData.payload;
-    if (typeof payload === 'string') {
-      try {
-        payload = JSON.parse(payload);
-      } catch (e) {
-        payload = { value: payload };
-      }
-    }
+    const key = payloadKey(sourceData);
+    const payload = parsedPayload(sourceData);
 
     if (typeof payload === 'object' && payload !== null) {
       this.traverseObject(payload, '', (path, value) => {
@@ -96,7 +98,7 @@ class MQTTMapper extends BaseMapper {
             type: this.inferDataType(value),
             unit: this.inferUnit(path, value),
             description: `MQTT measurement from topic ${sourceData.topic}`,
-            sourcePath: `payload.${path}`
+            sourcePath: `${key}.${path}`
           });
         }
       });
@@ -107,7 +109,7 @@ class MQTTMapper extends BaseMapper {
         type: this.inferDataType(payload),
         unit: null,
         description: 'MQTT scalar value',
-        sourcePath: 'payload'
+        sourcePath: key
       });
     }
 
@@ -134,12 +136,13 @@ class MQTTMapper extends BaseMapper {
    */
   extractDeviceId(sourceData, context) {
     // Try to extract from payload
-    if (sourceData.payload?.id) {
-      return sourceData.payload.id;
+    const payload = parsedPayload(sourceData);
+    if (payload?.id) {
+      return String(payload.id);
     }
     
     // Use topic as basis for ID
-    const topicId = sourceData.topic.replace(/\//g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+    const topicId = String(sourceData.topic || 'unknown').replace(/\//g, '_').replace(/[^a-zA-Z0-9_]/g, '');
     return context.deviceId || `mqtt_${topicId}`;
   }
 
@@ -147,8 +150,9 @@ class MQTTMapper extends BaseMapper {
    * Determine device type from MQTT topic
    */
   determineDeviceType(sourceData, context) {
-    if (sourceData.payload?.type) {
-      return sourceData.payload.type;
+    const payload = parsedPayload(sourceData);
+    if (payload?.type) {
+      return String(payload.type);
     }
 
     // Extract from topic

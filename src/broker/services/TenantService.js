@@ -54,6 +54,8 @@ class TenantService {
     if (id === 'default') throw badRequest("The 'default' tenant cannot be deleted");
     const { rowCount } = await this.pool.query('DELETE FROM tenants WHERE id = $1', [id]);
     if (!rowCount) throw notFound(`Tenant '${id}' not found`);
+    // History has no foreign key (hypertable): remove it explicitly
+    await this.pool.query('DELETE FROM attribute_history WHERE tenant = $1', [id]);
   }
 
   async members(tenant) {

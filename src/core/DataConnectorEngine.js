@@ -228,14 +228,13 @@ class DataConnectorEngine extends EventEmitter {
 
       // Save new sources configuration if provided
       if (newSources) {
-        const config = { sources: newSources };
-        configManager.saveConfig(config);
+        configManager.sources = newSources;
+        await configManager.saveSourcesConfig();
         logger.info('New sources configuration saved');
-      } else {
-        // Reload from file
-        configManager.loadConfig();
-        logger.info('Sources configuration reloaded from file');
       }
+      // (Re)load from file: validates and applies defaults
+      await configManager.loadSourcesConfig();
+      logger.info('Sources configuration reloaded from file');
 
       // Get current enabled sources
       const enabledSources = configManager.getEnabledSources();

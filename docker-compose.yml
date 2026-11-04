@@ -59,13 +59,14 @@ services:
       BROKER_ADMIN_PASSWORD: ${BROKER_ADMIN_PASSWORD:?set BROKER_ADMIN_PASSWORD in .env}
       NATS_URL: nats://nats:4222
       BROKER_MQTT_URL: mqtt://mqtt:1883
+      # Raw connector data buffer; entity history is stored by the broker in TimescaleDB
+      UDC_RAW_STORAGE: ${UDC_RAW_STORAGE:-memory}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ./config:/app/config
       - udc-logs:/app/logs
     ports:
       - "3000:3000"
-      - "3001:3001"
     restart: unless-stopped
 
   ui:
