@@ -105,6 +105,7 @@ class Broker {
         await migrate(this.pool);
         await this.services.users.bootstrap();
         await this.services.history.configureRetention();
+        await this.services.entities.detectGeo();
         this.dbReady = true;
       }
       if (!this.messagingReady) {
@@ -156,6 +157,7 @@ class Broker {
       ready: this.ready,
       instance: this.instanceId,
       database: this.dbReady,
+      geo: this.services.entities.geoEnabled,
       messaging: this.nats.enabled ? (this.nats.connected ? 'nats' : 'nats-disconnected') : 'memory',
       error: this.lastError
     };

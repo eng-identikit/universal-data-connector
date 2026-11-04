@@ -1,12 +1,16 @@
 const EventEmitter = require('events');
 const { withTransaction } = require('../db/pool');
-const { badRequest, forbidden, notFound, conflict } = require('../errors');
+const { BrokerError, badRequest, forbidden, notFound, conflict } = require('../errors');
 const model = require('../model/entityModel');
 
 const MAX_LIMIT = 1000;
 const MAX_DEPTH = 10;
 const MAX_BATCH = 1000;
 const ORDER_COLUMNS = { id: 'id', type: 'type', createdAt: 'created_at', updatedAt: 'updated_at' };
+// Explicit list: the PostGIS geom column is internal (derived from location)
+const COLUMNS = 'tenant, id, type, attrs, location, version, created_at, updated_at';
+const MAX_DISTANCE_M = 20000000;
+const GEOREL = { within: 'ST_Within', intersects: 'ST_Intersects', disjoint: 'ST_Disjoint', contains: 'ST_Contains' };
 
 /**
  * Entity store on PostgreSQL.
@@ -22,6 +26,63 @@ class EntityService extends EventEmitter {
     super();
     this.pool = pool;
     this.history = history;
+    this.geoEnabled = false;
+  }
+
+  /** Geo queries need the PostGIS geom column (migration 004 skips it without PostGIS). */
+  async detectGeo() {
+    const { rows } = await this.pool.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_name = 'entities' AND column_name = 'geom'"
+    );
+    this.geoEnabled = rows.length > 0;
+    return this.geoEnabled;
+  }
+
+  /**
+   * Geo filters for list():
+   *   bbox=minLon,minLat,maxLon,maxLat
+   *   near=lon,lat&maxDistance=<m>        (results gain distanceM, ordered by distance)
+   *   georel=within|intersects|disjoint|contains&geometry=<GeoJSON>
+   *   located=true                        only entities with a location
+   */
+  _geoFilter(query, add) {
+    const where = [];
+    let distance = null;
+    if (query.located === 'true' || query.located === true) where.push('location IS NOT NULL');
+    if (!query.bbox && !query.near && !query.georel) return { where, distance };
+    if (!this.geoEnabled) throw new BrokerError(501, 'NotImplemented', 'Geo queries need PostGIS on the broker database');
+
+    if (query.bbox) {
+      const b = String(query.bbox).split(',').map(Number);
+      if (b.length !== 4 || b.some(n => !Number.isFinite(n)) || b[0] > b[2] || b[1] > b[3]) {
+        throw badRequest('bbox must be minLon,minLat,maxLon,maxLat');
+      }
+      where.push(`ST_Intersects(geom, ST_MakeEnvelope(${add(b[0])}, ${add(b[1])}, ${add(b[2])}, ${add(b[3])}, 4326))`);
+    }
+    if (query.near) {
+      const p = String(query.near).split(',').map(Number);
+      if (p.length !== 2 || p.some(n => !Number.isFinite(n)) || Math.abs(p[0]) > 180 || Math.abs(p[1]) > 90) {
+        throw badRequest('near must be lon,lat');
+      }
+      const max = query.maxDistance === undefined ? 1000 : Number(query.maxDistance);
+      if (!Number.isFinite(max) || max <= 0 || max > MAX_DISTANCE_M) throw badRequest(`maxDistance must be between 0 and ${MAX_DISTANCE_M} meters`);
+      const point = `ST_SetSRID(ST_MakePoint(${add(p[0])}, ${add(p[1])}), 4326)::geography`;
+      where.push(`ST_DWithin(geom::geography, ${point}, ${add(max)})`);
+      distance = `ST_Distance(geom::geography, ${point})`;
+    }
+    if (query.georel) {
+      const fn = GEOREL[query.georel];
+      if (!fn) throw badRequest(`georel must be one of ${Object.keys(GEOREL).join(', ')}`);
+      let geometry;
+      try {
+        geometry = typeof query.geometry === 'string' ? JSON.parse(query.geometry) : query.geometry;
+      } catch {
+        throw badRequest('geometry must be a GeoJSON geometry (JSON)');
+      }
+      geometry = model.normalizeGeometry(geometry, 'geometry');
+      where.push(`${fn}(geom, ST_SetSRID(ST_GeomFromGeoJSON(${add(JSON.stringify(geometry))}), 4326))`);
+    }
+    return { where, distance };
   }
 
   // ─── Reads ────────────────────────────────────────────────────────────────
@@ -61,14 +122,19 @@ class EntityService extends EventEmitter {
       where.push('id IN (SELECT id FROM reach)');
     }
 
+    const geo = this._geoFilter(query, add);
+    where.push(...geo.where);
+
     const limit = parseIntParam(query.limit, 100, 1, MAX_LIMIT, 'limit');
     const offset = parseIntParam(query.offset, 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
-    const orderBy = parseOrderBy(query.orderBy);
+    let orderBy = parseOrderBy(query.orderBy);
+    if (geo.distance && !query.orderBy) orderBy = 'distance_m ASC, id ASC';
+    const select = geo.distance ? `${COLUMNS}, ${geo.distance} AS distance_m` : COLUMNS;
     const whereSql = where.join(' AND ');
 
     const [rows, count] = await Promise.all([
       this.pool.query(
-        `${cte}SELECT * FROM entities WHERE ${whereSql} ORDER BY ${orderBy} LIMIT ${add(limit)} OFFSET ${add(offset)}`,
+        `${cte}SELECT ${select} FROM entities WHERE ${whereSql} ORDER BY ${orderBy} LIMIT ${add(limit)} OFFSET ${add(offset)}`,
         params
       ),
       this.pool.query(`${cte}SELECT count(*)::int AS total FROM entities WHERE ${whereSql}`, params.slice(0, params.length - 2))
@@ -84,7 +150,7 @@ class EntityService extends EventEmitter {
   }
 
   async get(ctx, id, { attrs } = {}) {
-    const { rows } = await this.pool.query('SELECT * FROM entities WHERE tenant = $1 AND id = $2', [ctx.tenant, id]);
+    const { rows } = await this.pool.query(`SELECT ${COLUMNS} FROM entities WHERE tenant = $1 AND id = $2`, [ctx.tenant, id]);
     if (!rows.length || !typeAllowed(ctx, rows[0].type)) throw notFound(`Entity '${id}' not found`);
     return project(toEntity(rows[0]), splitList(attrs));
   }
@@ -277,7 +343,7 @@ class EntityService extends EventEmitter {
   }
 
   async _lock(client, ctx, id, { required = true } = {}) {
-    const { rows } = await client.query('SELECT * FROM entities WHERE tenant = $1 AND id = $2 FOR UPDATE', [ctx.tenant, id]);
+    const { rows } = await client.query(`SELECT ${COLUMNS} FROM entities WHERE tenant = $1 AND id = $2 FOR UPDATE`, [ctx.tenant, id]);
     if (!rows.length || !typeAllowed(ctx, rows[0].type)) {
       if (required) throw notFound(`Entity '${id}' not found`);
       return null;
@@ -289,7 +355,7 @@ class EntityService extends EventEmitter {
   async _insert(client, tenant, entity) {
     const { rows } = await client.query(
       `INSERT INTO entities (tenant, id, type, attrs, location) VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (tenant, id) DO NOTHING RETURNING *`,
+       ON CONFLICT (tenant, id) DO NOTHING RETURNING ${COLUMNS}`,
       [tenant, entity.id, entity.type, entity.attrs, entity.location]
     );
     if (!rows.length) throw conflict(`Entity '${entity.id}' already exists`);
@@ -302,7 +368,7 @@ class EntityService extends EventEmitter {
   async _write(client, tenant, existing, next) {
     const { rows } = await client.query(
       `UPDATE entities SET attrs = $3, location = $4, version = version + 1, updated_at = now()
-        WHERE tenant = $1 AND id = $2 RETURNING *`,
+        WHERE tenant = $1 AND id = $2 RETURNING ${COLUMNS}`,
       [tenant, existing.id, next.attrs, next.location ?? null]
     );
     await this._syncRelationships(
@@ -335,7 +401,7 @@ class EntityService extends EventEmitter {
 
     const events = await withTransaction(this.pool, async client => {
       const { rows } = await client.query(
-        'SELECT * FROM entities WHERE tenant = $1 AND id = ANY($2) ORDER BY id FOR UPDATE', [tenant, ids]
+        `SELECT ${COLUMNS} FROM entities WHERE tenant = $1 AND id = ANY($2) ORDER BY id FOR UPDATE`, [tenant, ids]
       );
       const existing = new Map(rows.map(r => [r.id, toEntity(r)]));
 
@@ -363,7 +429,7 @@ class EntityService extends EventEmitter {
          SELECT $1, i, t, a, l FROM unnest($2::text[], $3::text[], $4::jsonb[], $5::jsonb[]) AS x(i, t, a, l)
          ON CONFLICT (tenant, id) DO UPDATE
            SET attrs = EXCLUDED.attrs, location = EXCLUDED.location, version = e.version + 1, updated_at = now()
-         RETURNING *`,
+         RETURNING ${COLUMNS}`,
         [tenant, writes.map(w => w.next.id), writes.map(w => w.next.type),
           writes.map(w => JSON.stringify(w.next.attrs)), writes.map(w => (w.next.location ? JSON.stringify(w.next.location) : null))]
       );
@@ -417,6 +483,7 @@ function toEntity(row) {
     attrs: row.attrs
   };
   if (row.location) entity.location = row.location;
+  if (row.distance_m !== undefined && row.distance_m !== null) entity.distanceM = Math.round(row.distance_m * 10) / 10;
   return entity;
 }
 

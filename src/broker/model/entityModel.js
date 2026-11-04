@@ -110,12 +110,37 @@ function normalizeAttr(name, input, existing, now) {
   return attr;
 }
 
+// GeoJSON position: [lon, lat] (optional altitude), WGS84
+const isPosition = (p) => Array.isArray(p) && p.length >= 2 && p.length <= 3 && p.every(n => typeof n === 'number' && Number.isFinite(n))
+  && p[0] >= -180 && p[0] <= 180 && p[1] >= -90 && p[1] <= 90;
+const isLine = (l) => Array.isArray(l) && l.length >= 2 && l.every(isPosition);
+const isRing = (r) => Array.isArray(r) && r.length >= 4 && r.every(isPosition)
+  && r[0][0] === r[r.length - 1][0] && r[0][1] === r[r.length - 1][1];
+const isPolygon = (p) => Array.isArray(p) && p.length >= 1 && p.every(isRing);
+
+const GEO_CHECKS = {
+  Point: isPosition,
+  MultiPoint: (c) => Array.isArray(c) && c.length >= 1 && c.every(isPosition),
+  LineString: isLine,
+  MultiLineString: (c) => Array.isArray(c) && c.length >= 1 && c.every(isLine),
+  Polygon: isPolygon,
+  MultiPolygon: (c) => Array.isArray(c) && c.length >= 1 && c.every(isPolygon)
+};
+
+/** Validates a GeoJSON geometry; `field` names it in errors. Returns a clean copy. */
+function normalizeGeometry(geometry, field) {
+  if (!isPlainObject(geometry) || !GEO_TYPES.includes(geometry.type) || !Array.isArray(geometry.coordinates)) {
+    throw badRequest(`Invalid ${field}: expected a GeoJSON geometry (${GEO_TYPES.join(', ')})`, { field });
+  }
+  if (!GEO_CHECKS[geometry.type](geometry.coordinates)) {
+    throw badRequest(`Invalid ${field}: malformed ${geometry.type} coordinates ([lon, lat] in degrees; polygon rings closed, at least 4 positions)`, { field });
+  }
+  return { type: geometry.type, coordinates: geometry.coordinates };
+}
+
 function normalizeLocation(location) {
   if (location === null || location === undefined) return null;
-  if (!isPlainObject(location) || !GEO_TYPES.includes(location.type) || !Array.isArray(location.coordinates)) {
-    throw badRequest(`Invalid location: expected a GeoJSON geometry (${GEO_TYPES.join(', ')})`, { field: 'location' });
-  }
-  return { type: location.type, coordinates: location.coordinates };
+  return normalizeGeometry(location, 'location');
 }
 
 function normalizeAttrs(attrsInput, existingAttrs, now, { merge }) {
@@ -182,6 +207,7 @@ module.exports = {
   assertAttrName,
   normalizeAttr,
   normalizeEntity,
+  normalizeGeometry,
   applyPatch,
   extractRelationships
 };
