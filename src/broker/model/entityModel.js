@@ -35,9 +35,11 @@ function assertAttrName(name) {
   }
 }
 
+// Numbers are inferred as float: a sensor sending 25 then 25.5 must not be rejected.
+// 'int' is only used when declared explicitly.
 function inferType(value) {
   if (typeof value === 'boolean') return 'bool';
-  if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';
+  if (typeof value === 'number') return 'float';
   if (typeof value === 'string') return 'string';
   return 'json';
 }

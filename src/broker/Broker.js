@@ -1,3 +1,5 @@
+const os = require('os');
+const crypto = require('crypto');
 const express = require('express');
 const logger = require('../utils/logger');
 const { createPool } = require('./db/pool');
@@ -8,29 +10,74 @@ const EntityService = require('./services/EntityService');
 const UserService = require('./services/UserService');
 const TenantService = require('./services/TenantService');
 const ApiKeyService = require('./services/ApiKeyService');
+const SubscriptionService = require('./subscriptions/SubscriptionService');
+const SubscriptionEngine = require('./subscriptions/SubscriptionEngine');
+const NatsClient = require('./messaging/NatsClient');
+const ChangeBus = require('./messaging/ChangeBus');
+const { JetStreamQueue, MemoryQueue } = require('./messaging/WorkQueue');
+const Channels = require('./notify/channels');
+const DeliveryWorker = require('./notify/DeliveryWorker');
+const StreamHub = require('./realtime/StreamHub');
 const authRoutes = require('./api/authRoutes');
 const adminRoutes = require('./api/adminRoutes');
 const entityRoutes = require('./api/entityRoutes');
+const subscriptionRoutes = require('./api/subscriptionRoutes');
 
 const RETRY_INTERVAL_MS = 5000;
 
 /**
- * Context broker: entity store, users/tenants/API keys and the /api/v2 router.
+ * Context broker: entity store, subscriptions, notifications, realtime stream,
+ * users/tenants/API keys and the /api/v2 router.
  *
- * start() does not block server startup: if PostgreSQL is unreachable it keeps
- * retrying in the background and /api/v2 answers 503 until it is ready.
+ * start() does not block server startup: until PostgreSQL (and NATS, when
+ * NATS_URL is set) are reachable it keeps retrying in the background and
+ * /api/v2 answers 503.
  */
 class Broker {
   constructor() {
+    this.instanceId = `${os.hostname()}-${process.pid}-${crypto.randomBytes(2).toString('hex')}`;
     this.pool = createPool();
     this.pool.on('error', (error) => logger.error(`Broker DB pool error: ${error.message}`));
+    this.nats = new NatsClient();
+    this.bus = new ChangeBus(this.nats, this.instanceId);
+
     this.services = {
       entities: new EntityService(this.pool),
       users: new UserService(this.pool),
       tenants: new TenantService(this.pool),
-      apiKeys: new ApiKeyService(this.pool)
+      apiKeys: new ApiKeyService(this.pool),
+      subscriptions: new SubscriptionService(this.pool)
     };
+
+    this.notifyQueue = this.nats.enabled
+      ? new JetStreamQueue(this.nats, { stream: 'UDC_NOTIFY', durable: 'udc-delivery' })
+      : new MemoryQueue({ name: 'notify' });
+    this.engine = new SubscriptionEngine({
+      subscriptions: this.services.subscriptions,
+      entities: this.services.entities,
+      queue: this.notifyQueue,
+      bus: this.bus
+    });
+    this.hub = new StreamHub({ services: this.services, bus: this.bus, natsClient: this.nats });
+    this.channels = new Channels({ natsClient: this.nats, hub: this.hub });
+    this.worker = new DeliveryWorker({
+      queue: this.notifyQueue,
+      engine: this.engine,
+      channels: this.channels,
+      subscriptions: this.services.subscriptions
+    });
+
+    // Committed entity writes fan out to every instance through the bus
+    this.services.entities.on('entityChanged', (change) => this.bus.publish(change));
+    // Subscription CRUD: apply here before answering, then tell the other instances
+    this.services.subscriptions.onChange = async (tenant, id) => {
+      await this.engine.reload(id);
+      this.bus.control({ kind: 'subscription', tenant, id });
+    };
+
     this.ready = false;
+    this.dbReady = false;
+    this.messagingReady = false;
     this.lastError = null;
     this.retryTimer = null;
     this.stopped = false;
@@ -39,11 +86,21 @@ class Broker {
 
   async start() {
     try {
-      await migrate(this.pool);
-      await this.services.users.bootstrap();
+      if (!this.dbReady) {
+        await migrate(this.pool);
+        await this.services.users.bootstrap();
+        this.dbReady = true;
+      }
+      if (!this.messagingReady) {
+        await this.nats.connect();
+        this.bus.start();
+        await this.worker.start();
+        await this.engine.start();
+        this.messagingReady = true;
+      }
       this.ready = true;
       this.lastError = null;
-      logger.info('Broker ready');
+      logger.info(`Broker ready (instance ${this.instanceId}, ${this.nats.enabled ? 'NATS JetStream' : 'in-memory queues'})`);
     } catch (error) {
       this.lastError = error.message;
       logger.error(`Broker not ready (${error.message}), retrying in ${RETRY_INTERVAL_MS / 1000}s`);
@@ -51,14 +108,31 @@ class Broker {
     }
   }
 
+  /** Attaches the realtime WebSocket stream to the HTTP server. */
+  attach(server) {
+    this.hub.attach(server);
+  }
+
   async stop() {
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    await this.engine.stop().catch(() => {});
+    this.notifyQueue.stop();
+    this.hub.close();
+    this.bus.stop();
+    await this.channels.close();
+    await this.nats.close();
     await this.pool.end();
   }
 
   status() {
-    return { ready: this.ready, error: this.lastError };
+    return {
+      ready: this.ready,
+      instance: this.instanceId,
+      database: this.dbReady,
+      messaging: this.nats.enabled ? (this.nats.connected ? 'nats' : 'nats-disconnected') : 'memory',
+      error: this.lastError
+    };
   }
 
   /**
@@ -84,14 +158,15 @@ class Broker {
     const auth = authenticate(this.services);
     this.authenticate = auth;
     const tenantRole = (role) => requireTenantRole(role, this.services);
-    const deps = { services: this.services, authenticate: auth, tenantRole };
+    const deps = { services: this.services, authenticate: auth, tenantRole, engine: this.engine, worker: this.worker, broker: this };
 
     router.get('/health', (req, res) => res.status(this.ready ? 200 : 503).json(this.status()));
-    router.use((req, res, next) => next(this.ready ? undefined : unavailable('Broker is starting: database not ready')));
+    router.use((req, res, next) => next(this.ready ? undefined : unavailable('Broker is starting: database or messaging not ready')));
 
     router.use('/auth', authRoutes(deps));
     router.use(auth);
     router.use(entityRoutes(deps));
+    router.use(subscriptionRoutes(deps));
     router.use(adminRoutes(deps));
 
     router.use((req, res) => res.status(404).json({ error: 'NotFound', message: `No route for ${req.method} ${req.originalUrl}` }));

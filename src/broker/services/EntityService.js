@@ -88,6 +88,22 @@ class EntityService extends EventEmitter {
     return project(toEntity(rows[0]), splitList(attrs));
   }
 
+  /** Ids reachable from `id` through relationships (same semantics as list ?related). */
+  async reachableIds(tenant, id, depth = 1, direction = 'in') {
+    const [from, to] = direction === 'in' ? ['source_id', 'target_id'] : ['target_id', 'source_id'];
+    const { rows } = await this.pool.query(
+      `WITH RECURSIVE reach(id, depth) AS (
+          SELECT ${from}, 1 FROM entity_relationships WHERE tenant = $1 AND ${to} = $2
+          UNION
+          SELECT er.${from}, reach.depth + 1 FROM entity_relationships er
+            JOIN reach ON er.${to} = reach.id
+           WHERE er.tenant = $1 AND reach.depth < $3
+        ) SELECT DISTINCT id FROM reach`,
+      [tenant, id, Math.min(Math.max(depth, 1), MAX_DEPTH)]
+    );
+    return rows.map(r => r.id);
+  }
+
   async types(ctx) {
     const params = [ctx.tenant];
     let filter = '';

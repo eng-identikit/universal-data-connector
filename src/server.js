@@ -275,6 +275,7 @@ class UniversalDataConnector {
         logger.info(`  WebSocket: ws://localhost:${this.wsPort}`);
         console.log('█'.repeat(80));
       });
+      this.broker.attach(this.server);
       // Start the data connector engine
       await this.engine.start();
 

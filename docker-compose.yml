@@ -31,12 +31,22 @@ services:
       - "8222:8222"
     restart: unless-stopped
 
+  # MQTT broker for notification channels and MQTT connectors
+  mqtt:
+    image: eclipse-mosquitto:2
+    command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+    ports:
+      - "1883:1883"
+    restart: unless-stopped
+
   udc:
     build: .
     depends_on:
       db:
         condition: service_healthy
       nats:
+        condition: service_started
+      mqtt:
         condition: service_started
     environment:
       BROKER_DB_HOST: db
@@ -48,6 +58,7 @@ services:
       BROKER_ADMIN_USER: ${BROKER_ADMIN_USER:-admin}
       BROKER_ADMIN_PASSWORD: ${BROKER_ADMIN_PASSWORD:?set BROKER_ADMIN_PASSWORD in .env}
       NATS_URL: nats://nats:4222
+      BROKER_MQTT_URL: mqtt://mqtt:1883
       LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ./config:/app/config

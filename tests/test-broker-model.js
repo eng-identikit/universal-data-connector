@@ -35,7 +35,8 @@ test('normalizes a full entity and infers attribute types', () => {
     attrs: { temperature: 82.4, count: 3, running: true, label: 'P7', partOf: { target: 'plant1:line3' } }
   }, NOW);
   assert.strictEqual(e.attrs.temperature.type, 'float');
-  assert.strictEqual(e.attrs.count.type, 'int');
+  // integers are inferred as float too, so later fractional values are accepted
+  assert.strictEqual(e.attrs.count.type, 'float');
   assert.strictEqual(e.attrs.running.type, 'bool');
   assert.strictEqual(e.attrs.label.type, 'string');
   assert.deepStrictEqual(e.attrs.partOf, { target: 'plant1:line3', type: 'relationship', ts: NOW });
