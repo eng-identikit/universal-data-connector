@@ -123,8 +123,18 @@ function validate(schema, input) {
   if (value.notify?.channel === 'http' && /[\r\n]/.test(Object.values(value.notify.headers || {}).join(''))) {
     throw badRequest('notify.headers must not contain line breaks');
   }
+  const { channel, url } = value.notify || {};
+  if ((channel === 'mqtt' || channel === 'nats') && !url && !defaultBrokers()[channel]) {
+    throw badRequest(`notify.url is required: no default ${channel.toUpperCase()} broker is configured`, { field: 'notify.url' });
+  }
   return value;
 }
+
+/** Channels that work without notify.url, from the environment (MQTT and NATS are optional services). */
+const defaultBrokers = () => ({
+  mqtt: !!(process.env.BROKER_MQTT_URL || process.env.MQTT_URL),
+  nats: !!process.env.NATS_URL
+});
 
 /** Full subscription body for create. */
 const validateCreate = (input) => validate(createSchema, input);
@@ -132,4 +142,4 @@ const validateCreate = (input) => validate(createSchema, input);
 /** Full body after merging a patch over the stored subscription (validated as a whole). */
 const validateMerged = (input) => validate(createSchema, input);
 
-module.exports = { validateCreate, validateMerged };
+module.exports = { validateCreate, validateMerged, defaultBrokers };

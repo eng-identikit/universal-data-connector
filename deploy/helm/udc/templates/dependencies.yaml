@@ -66,7 +66,7 @@ spec:
       targetPort: postgres
 {{- end }}
 ---
-{{- if .Values.nats.bundled }}
+{{- if and .Values.nats.enabled .Values.nats.bundled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -122,4 +122,45 @@ spec:
     - name: client
       port: 4222
       targetPort: client
+{{- end }}
+{{- if .Values.mqtt.bundled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "udc.fullname" . }}-mqtt
+  labels: {{- include "udc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mqtt
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "udc.selector" . | nindent 6 }}
+      app.kubernetes.io/component: mqtt
+  template:
+    metadata:
+      labels: {{- include "udc.selector" . | nindent 8 }}
+        app.kubernetes.io/component: mqtt
+    spec:
+      containers:
+        - name: mqtt
+          image: {{ .Values.mqtt.image }}
+          args: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+          ports:
+            - name: mqtt
+              containerPort: 1883
+          readinessProbe:
+            tcpSocket: { port: mqtt }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "udc.fullname" . }}-mqtt
+  labels: {{- include "udc.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "udc.selector" . | nindent 4 }}
+    app.kubernetes.io/component: mqtt
+  ports:
+    - name: mqtt
+      port: 1883
+      targetPort: mqtt
 {{- end }}

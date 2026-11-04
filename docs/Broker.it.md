@@ -43,13 +43,28 @@ L'Universal Data Connector è un **context broker standalone**: legge i disposit
 - **NATS JetStream** fornisce le due code durevoli: ingest e notifiche. Le modifiche alle entità arrivano a tutte le istanze su NATS core, a pacchetti.
 - Senza `NATS_URL` il broker gira in **istanza singola** con code in memoria.
 
+### Servizi opzionali: NATS e MQTT
+
+Solo PostgreSQL è obbligatorio. NATS e Mosquitto si attivano da configurazione:
+
+| Servizio | Cosa offre | Senza |
+|---|---|---|
+| NATS JetStream | Code durevoli (at-least-once anche dopo un riavvio), modalità cluster, predefinito del canale `nats` | Una sola istanza; code in memoria, quindi le notifiche non ancora consegnate si perdono al riavvio; le subscription `nats` devono indicare `notify.url` |
+| MQTT (Mosquitto) | Broker predefinito del canale `mqtt` | Le subscription `mqtt` devono indicare `notify.url` |
+
+Le subscription HTTP e WebSocket non richiedono nessuno dei due. Una subscription che conta su un broker predefinito non configurato viene rifiutata con 400, e il wizard della UI chiede l'URL.
+
+- **Compose**: `COMPOSE_PROFILES` in `.env` avvia i servizi inclusi (`nats`, `mqtt`, entrambi o nessuno). `COMPOSE_NATS_URL` e `COMPOSE_MQTT_URL` dicono al container del backend cosa usare (`nats://nats:4222`, `mqtt://mqtt:1883`, un server esterno, oppure vuoto). La modalità cluster richiede NATS.
+- **Helm**: `nats.enabled=false` toglie NATS (richiede `backend.replicas=1`); `mqtt.bundled=true` aggiunge un Mosquitto, oppure `mqtt.url` punta a uno esterno.
+- **Fuori dai container**: `NATS_URL` e `BROKER_MQTT_URL`.
+
 ## Avvio
 
 | Modalità | Comando |
 |---|---|
 | Sviluppo, istanza singola | `cp .env.example .env` (imposta `BROKER_JWT_SECRET` e `BROKER_ADMIN_PASSWORD`), poi `docker compose up -d --build` |
 | Cluster con Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 repliche, `UDC_REPLICAS` per cambiarle) |
-| Kubernetes | `helm install udc deploy/helm/udc` (vedi `values.yaml`: database e NATS inclusi oppure esterni) |
+| Kubernetes | `helm install udc deploy/helm/udc` (vedi `values.yaml`: database e NATS inclusi oppure esterni, NATS e MQTT opzionali) |
 
 La UI è su **http://localhost:8080**: nginx inoltra `/api` e lo stream WebSocket al backend. L'API è anche su `:3000` in istanza singola. Il primo avvio crea il tenant `default` e il superadmin `BROKER_ADMIN_USER`; se `BROKER_ADMIN_PASSWORD` manca, la password viene generata e scritta nel log una volta sola.
 

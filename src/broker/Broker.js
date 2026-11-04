@@ -14,6 +14,7 @@ const ApiKeyService = require('./services/ApiKeyService');
 const HistoryService = require('./services/HistoryService');
 const SubscriptionService = require('./subscriptions/SubscriptionService');
 const SubscriptionEngine = require('./subscriptions/SubscriptionEngine');
+const { defaultBrokers } = require('./subscriptions/subscriptionSchema');
 const NatsClient = require('./messaging/NatsClient');
 const ChangeBus = require('./messaging/ChangeBus');
 const { JetStreamQueue, MemoryQueue } = require('./messaging/WorkQueue');
@@ -194,6 +195,8 @@ class Broker {
       geo: this.services.entities.geoEnabled,
       cluster: !!this.cluster,
       messaging: this.nats.enabled ? (this.nats.connected ? 'nats' : 'nats-disconnected') : 'memory',
+      // Notification channels usable without an explicit notify.url
+      defaultBrokers: defaultBrokers(),
       error: this.lastError
     };
   }

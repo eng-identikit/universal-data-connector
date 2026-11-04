@@ -270,6 +270,23 @@ async function main() {
     });
   }
 
+  await test('mqtt/nats without notify.url need a default broker', async () => {
+    const saved = { mqtt: process.env.BROKER_MQTT_URL, legacy: process.env.MQTT_URL };
+    delete process.env.BROKER_MQTT_URL;
+    delete process.env.MQTT_URL;
+    try {
+      const r = await call('POST', '/subscriptions', { name: 'no-broker', select: { ids: ['s2'] }, notify: { channel: 'mqtt', topic: 'x/{entityId}' } });
+      assert.strictEqual(r.status, 400);
+      assert.match(r.body.message, /no default MQTT broker/);
+      process.env.BROKER_MQTT_URL = 'mqtt://localhost:1883';
+      const health = await fetch(`${base}/health`).then(res => res.json());
+      assert.deepStrictEqual(health.defaultBrokers, { mqtt: true, nats: broker.nats.enabled });
+    } finally {
+      if (saved.mqtt === undefined) delete process.env.BROKER_MQTT_URL; else process.env.BROKER_MQTT_URL = saved.mqtt;
+      if (saved.legacy !== undefined) process.env.MQTT_URL = saved.legacy;
+    }
+  });
+
   if (broker.nats.enabled) {
     await test('nats channel publishes on the subject', async () => {
       const msgs = [];

@@ -27,6 +27,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.nats.bundled -}}nats://{{ include "udc.fullname" . }}-nats:4222{{- else -}}{{ required "nats.url is required when nats.bundled=false" .Values.nats.url }}{{- end -}}
 {{- end -}}
 
+{{- define "udc.mqttUrl" -}}
+{{- if .Values.mqtt.bundled -}}mqtt://{{ include "udc.fullname" . }}-mqtt:1883{{- else -}}{{ .Values.mqtt.url }}{{- end -}}
+{{- end -}}
+
 {{/* Value of an existing secret key, so generated secrets survive upgrades */}}
 {{- define "udc.secretValue" -}}
 {{- $existing := lookup "v1" "Secret" .ctx.Release.Namespace (printf "%s-secrets" (include "udc.fullname" .ctx)) -}}

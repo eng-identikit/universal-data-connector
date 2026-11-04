@@ -1,4 +1,7 @@
-# UDC Broker stack: PostgreSQL (TimescaleDB + PostGIS), NATS JetStream, backend, UI.
+# UDC Broker stack: PostgreSQL (TimescaleDB + PostGIS), backend, UI and two optional services:
+#   nats  NATS JetStream: durable notification/ingest queues, clustering, NATS channel
+#   mqtt  Mosquitto: default broker for MQTT notification channels and MQTT connectors
+# Pick them with COMPOSE_PROFILES in .env (e.g. COMPOSE_PROFILES=nats,mqtt or empty), then:
 #   docker compose up -d --build
 # UI: http://localhost:8080   API: http://localhost:3000/api/v2
 # Credentials and secrets come from .env (see .env.example).
@@ -22,6 +25,7 @@ services:
     restart: unless-stopped
 
   nats:
+    profiles: [nats]
     image: nats:2.10-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes:
@@ -33,6 +37,7 @@ services:
 
   # MQTT broker for notification channels and MQTT connectors
   mqtt:
+    profiles: [mqtt]
     image: eclipse-mosquitto:2
     command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
     ports:
@@ -46,8 +51,10 @@ services:
         condition: service_healthy
       nats:
         condition: service_started
+        required: false
       mqtt:
         condition: service_started
+        required: false
     environment:
       BROKER_DB_HOST: db
       BROKER_DB_PORT: 5432
@@ -57,8 +64,10 @@ services:
       BROKER_JWT_SECRET: ${BROKER_JWT_SECRET:?set BROKER_JWT_SECRET in .env}
       BROKER_ADMIN_USER: ${BROKER_ADMIN_USER:-admin}
       BROKER_ADMIN_PASSWORD: ${BROKER_ADMIN_PASSWORD:?set BROKER_ADMIN_PASSWORD in .env}
-      NATS_URL: nats://nats:4222
-      BROKER_MQTT_URL: mqtt://mqtt:1883
+      # Empty = not used. Point them to the bundled services (nats://nats:4222,
+      # mqtt://mqtt:1883) or to external ones.
+      NATS_URL: ${COMPOSE_NATS_URL:-}
+      BROKER_MQTT_URL: ${COMPOSE_MQTT_URL:-}
       # Raw connector data buffer; entity history is stored by the broker in TimescaleDB
       UDC_RAW_STORAGE: ${UDC_RAW_STORAGE:-memory}
       LOG_LEVEL: ${LOG_LEVEL:-info}

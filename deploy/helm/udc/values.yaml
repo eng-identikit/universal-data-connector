@@ -73,6 +73,9 @@ database:
     requests: { cpu: 500m, memory: 1Gi }
 
 nats:
+  # false: no NATS at all. The backend then runs a single replica with in-memory
+  # queues (pending notifications are lost on restart) and no NATS channel default.
+  enabled: true
   bundled: true
   # external: nats://nats.example:4222
   url: ""
@@ -81,5 +84,8 @@ nats:
   storageClass: ""
 
 mqtt:
-  # Default broker for MQTT notification channels (optional)
+  # Default broker for MQTT notification channels (optional): a bundled Mosquitto
+  # or an external url. Without either, MQTT subscriptions must set notify.url.
+  bundled: false
   url: ""
+  image: eclipse-mosquitto:2

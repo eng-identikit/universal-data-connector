@@ -1,5 +1,6 @@
 # Cluster mode: several backend replicas behind the UI's nginx.
 #   docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build
+# Needs NATS (COMPOSE_PROFILES=nats and COMPOSE_NATS_URL in .env).
 # Replicas share PostgreSQL and NATS; connectors and subscriptions are
 # split between them through leases (see docs/BrokerDesign.it.md).
 

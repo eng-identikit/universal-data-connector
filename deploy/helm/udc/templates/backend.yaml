@@ -5,7 +5,7 @@ metadata:
   labels: {{- include "udc.labels" . | nindent 4 }}
     app.kubernetes.io/component: backend
 spec:
-  replicas: {{ .Values.backend.replicas }}
+  replicas: {{ if or .Values.nats.enabled (le (int .Values.backend.replicas) 1) }}{{ .Values.backend.replicas }}{{ else }}{{ fail "backend.replicas > 1 needs NATS (nats.enabled=true)" }}{{ end }}
   selector:
     matchLabels: {{- include "udc.selector" . | nindent 6 }}
       app.kubernetes.io/component: backend
@@ -24,8 +24,10 @@ spec:
             - name: http
               containerPort: 3000
           env:
+            {{- if .Values.nats.enabled }}
             - name: BROKER_CLUSTER
               value: "true"
+            {{- end }}
             - name: BROKER_DB_HOST
               value: {{ include "udc.dbHost" . | quote }}
             - name: BROKER_DB_PORT
@@ -42,15 +44,17 @@ spec:
               value: {{ .Values.auth.adminUser | quote }}
             - name: BROKER_ADMIN_PASSWORD
               valueFrom: { secretKeyRef: { name: {{ include "udc.secretName" . }}, key: admin-password } }
+            {{- if .Values.nats.enabled }}
             - name: NATS_URL
               value: {{ include "udc.natsUrl" . | quote }}
+            {{- end }}
             - name: UDC_RAW_STORAGE
               value: {{ .Values.backend.rawStorage | quote }}
             - name: BROKER_HISTORY_RETENTION
               value: {{ .Values.backend.historyRetention | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.backend.logLevel | quote }}
-            {{- with .Values.mqtt.url }}
+            {{- with include "udc.mqttUrl" . }}
             - name: BROKER_MQTT_URL
               value: {{ . | quote }}
             {{- end }}
