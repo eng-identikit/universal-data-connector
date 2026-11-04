@@ -112,6 +112,20 @@ test('extracts relationships', () => {
   assert.deepStrictEqual(model.extractRelationships(e.attrs), [{ attr: 'partOf', target: 'b' }]);
 });
 
+test('change events compact to a diff and expand back to the previous state', () => {
+  const { compact, expand } = require('../src/broker/messaging/ChangeBus');
+  const previous = model.normalizeEntity({ id: 'a', type: 'T', attrs: { t: 1, gone: 'x', same: 'y' }, location: { type: 'Point', coordinates: [1, 2] } }, NOW);
+  const entity = model.applyPatch(previous, { attrs: { t: 2, gone: null, added: true }, location: null }, LATER);
+  const change = { tenant: 'x', op: 'update', entity: { ...entity, version: 2 }, previous: { ...previous, version: 1 } };
+  const wire = compact(change);
+  assert.deepStrictEqual(Object.keys(wire.before).sort(), ['added', 'gone', 't']);
+  const back = expand(JSON.parse(JSON.stringify(wire)));
+  assert.deepStrictEqual(back.previous.attrs, JSON.parse(JSON.stringify(previous.attrs)));
+  assert.deepStrictEqual(back.previous.location, previous.location);
+  assert.strictEqual(back.previous.version, 1);
+  assert.deepStrictEqual(back.entity, JSON.parse(JSON.stringify(change.entity)));
+});
+
 test('glob patterns become escaped LIKE patterns', () => {
   assert.strictEqual(globToLike('plant1:line3:*'), 'plant1:line3:%');
   assert.strictEqual(globToLike('a_b%*'), 'a\\_b\\%%');

@@ -1,0 +1,85 @@
+# Universal Data Connector Helm values.
+# Minimal install (bundled PostgreSQL and NATS, secrets generated on first install):
+#   helm install udc deploy/helm/udc
+# Production: point database/nats to managed services and set the secrets explicitly.
+
+backend:
+  image:
+    repository: udc/backend
+    tag: "2.0.0"
+    pullPolicy: IfNotPresent
+  # Replicas share the work through leases (connectors, subscription partitions)
+  replicas: 2
+  logLevel: info
+  # Raw connector data buffer: memory (entity history lives in the broker database)
+  rawStorage: memory
+  historyRetention: "90 days"
+  resources:
+    requests: { cpu: 250m, memory: 384Mi }
+    limits: { memory: 1Gi }
+  podDisruptionBudget:
+    minAvailable: 1
+  # Extra environment variables, e.g. BROKER_INGEST_FLUSH_MS
+  extraEnv: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+ui:
+  enabled: true
+  image:
+    repository: udc/ui
+    tag: "2.0.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { memory: 128Mi }
+
+service:
+  type: ClusterIP
+  backendPort: 3000
+  uiPort: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: udc.example.local
+  tls: []
+  #  - secretName: udc-tls
+  #    hosts: [udc.example.local]
+
+auth:
+  adminUser: admin
+  # Leave empty to generate on first install (kept on upgrades); or use existingSecret
+  adminPassword: ""
+  jwtSecret: ""
+  # Secret with keys: jwt-secret, admin-password, db-password
+  existingSecret: ""
+
+database:
+  # bundled: PostgreSQL with TimescaleDB + PostGIS in this release
+  bundled: true
+  host: ""
+  port: 5432
+  name: udc_broker
+  user: udc
+  password: ""
+  image: timescale/timescaledb-ha:pg16
+  storage: 20Gi
+  storageClass: ""
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+
+nats:
+  bundled: true
+  # external: nats://nats.example:4222
+  url: ""
+  image: nats:2.10-alpine
+  storage: 10Gi
+  storageClass: ""
+
+mqtt:
+  # Default broker for MQTT notification channels (optional)
+  url: ""

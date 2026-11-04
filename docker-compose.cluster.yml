@@ -1,0 +1,13 @@
+# Cluster mode: several backend replicas behind the UI's nginx.
+#   docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build
+# Replicas share PostgreSQL and NATS; connectors and subscriptions are
+# split between them through leases (see docs/BrokerDesign.it.md).
+
+services:
+  udc:
+    # No fixed host port with several replicas: reach the API through the UI on :8080
+    ports: !reset []
+    deploy:
+      replicas: ${UDC_REPLICAS:-3}
+    environment:
+      BROKER_CLUSTER: "true"

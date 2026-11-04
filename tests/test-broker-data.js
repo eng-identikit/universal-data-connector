@@ -133,6 +133,33 @@ async function main() {
     assert.strictEqual((await call('POST', '/ingest', { entities: [{ id: 'bad id', type: 'Meter' }] })).status, 400);
   });
 
+  await test('ingest keeps a concurrent API write (optimistic retry)', async () => {
+    await ok(call('POST', '/entities', { id: 'race', type: 'Meter', attrs: { a: 1, b: 1 } }), 201);
+    const entities = broker.services.entities;
+    const pool = entities.pool;
+    const query = pool.query.bind(pool);
+    let injected = false;
+    // Right after ingest reads the entity, an API PATCH changes it
+    pool.query = async (sql, params) => {
+      const result = await query(sql, params);
+      if (!injected && typeof sql === 'string' && sql.includes('extract(epoch FROM created_at)') && !sql.includes('INSERT')) {
+        injected = true;
+        await ok(call('PATCH', '/entities/race', { attrs: { b: 5 } }));
+      }
+      return result;
+    };
+    try {
+      const r = await entities.ingestBatch(TENANT, [{ id: 'race', type: 'Meter', attrs: { a: 2 } }]);
+      assert.strictEqual(r.written, 1);
+    } finally {
+      pool.query = query;
+    }
+    const e = await ok(call('GET', '/entities/race'));
+    assert.strictEqual(e.attrs.a.value, 2);
+    assert.strictEqual(e.attrs.b.value, 5);
+    assert.strictEqual(e.version, 3);
+  });
+
   await test('connector data becomes entities with unit, quality and source', async () => {
     engine.emit('data', {
       sourceId: 'plc1',

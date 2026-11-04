@@ -39,7 +39,14 @@ class UserService {
     } else {
       logger.info(`Broker: created superadmin '${username}' from BROKER_ADMIN_PASSWORD`);
     }
-    const user = await this.create({ username, password, displayName: 'Administrator', isSuperadmin: true });
+    let user;
+    try {
+      user = await this.create({ username, password, displayName: 'Administrator', isSuperadmin: true });
+    } catch (error) {
+      // Another instance bootstrapped at the same time
+      if (error.status === 409) return;
+      throw error;
+    }
     await this.pool.query(
       `INSERT INTO user_tenants (user_id, tenant, role) VALUES ($1, 'default', 'admin')`, [user.id]
     );

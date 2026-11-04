@@ -16,7 +16,7 @@
     "test:storage": "node tests/test-storage.js",
     "test:dynamic-config": "node tests/test-dynamic-config.js",
     "test:drivers": "node tests/test-drivers.js",
-    "test:broker": "node tests/test-broker-model.js && node tests/test-broker-expression.js && node tests/test-broker-api.js && node tests/test-broker-subscriptions.js && node tests/test-broker-data.js && node tests/test-broker-geo.js",
+    "test:broker": "node tests/test-broker-model.js && node tests/test-broker-expression.js && node tests/test-broker-api.js && node tests/test-broker-subscriptions.js && node tests/test-broker-data.js && node tests/test-broker-geo.js && node tests/test-broker-cluster.js",
     "build": "npm install"
   },
   "keywords": [

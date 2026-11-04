@@ -36,7 +36,7 @@ class CommandService {
           if (err) return;
           const request = this.nats.decode(msg.data);
           // Not running here: stay silent so the instance that runs it answers
-          if (!this.engine?.connectors.get(request.connector)) return;
+          if (!this._runsHere(request.connector)) return;
           try {
             await this._executeLocal(request);
             msg.respond(this.nats.encode({ ok: true }));
@@ -86,7 +86,7 @@ class CommandService {
         }
         if (!reply.ok) throw new Error(reply.error);
       } else {
-        if (!this.engine?.connectors.get(target.connector)) throw new Error(`Connector '${target.connector}' is not running`);
+        if (!this._runsHere(target.connector)) throw new Error(`Connector '${target.connector}' is not running`);
         await withTimeout(this._executeLocal(request), COMMAND_TIMEOUT_MS);
       }
     } catch (e) {
@@ -94,6 +94,12 @@ class CommandService {
       logger.warn(`Command ${command.id} on ${command.entityId}.${command.attr} failed: ${error}`);
     }
     return this._setStatus(command.id, error ? 'failed' : 'succeeded', error);
+  }
+
+  /** In a cluster a connector exists on every instance but runs on one (its lease owner). */
+  _runsHere(id) {
+    if (!this.engine) return false;
+    return typeof this.engine.isConnectorActive === 'function' ? this.engine.isConnectorActive(id) : this.engine.connectors.has(id);
   }
 
   async _executeLocal({ connector: id, method, args, value }) {

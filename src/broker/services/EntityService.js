@@ -19,7 +19,8 @@ const GEOREL = { within: 'ST_Within', intersects: 'ST_Intersects', disjoint: 'ST
  * middleware; allowedTypes (from API keys) limits both reads and writes.
  *
  * Emits 'entityChanged' { tenant, op: create|update|delete, entity, previous }
- * after each committed write.
+ * after each committed write, and 'entitiesChanged' [change, ...] once per
+ * ingest batch.
  */
 class EntityService extends EventEmitter {
   constructor(pool, { history = null } = {}) {
@@ -381,75 +382,114 @@ class EntityService extends EventEmitter {
   }
 
   /**
-   * High-throughput upsert used by connectors and /ingest: one transaction,
-   * two statements for the whole batch. Attributes are merged like PATCH;
-   * entities whose state would not change are skipped (no version bump, no event).
-   * Invalid items are reported in `rejected` instead of failing the batch.
+   * High-throughput upsert used by connectors and /ingest. Attributes are
+   * merged like PATCH; entities whose state would not change are skipped (no
+   * version bump, no event); invalid items are reported in `rejected`.
+   *
+   * Two round trips per batch, no explicit transaction (the event loop is busy at
+   * high rates and every round trip inside a transaction holds it open):
+   *   1. read the current state of the batch's entities
+   *   2. one statement upserting entities and appending history, applied only
+   *      where the version is still the one read (optimistic concurrency)
+   * Ingest partitions never overlap, so conflicts only come from concurrent API
+   * writes; those entities are re-read and retried.
    *
    * updates: [{ id, type, attrs, location? }]  (type is used only on create)
    */
-  async ingestBatch(tenant, updates, { allowedTypes = null } = {}) {
+  async ingestBatch(tenant, updates, { allowedTypes = null } = {}, attempt = 1) {
     // Last update wins when the same entity appears twice in a batch
     const byId = new Map();
     for (const u of updates) {
       const prev = byId.get(u.id);
       byId.set(u.id, prev ? { ...prev, ...u, attrs: { ...prev.attrs, ...u.attrs } } : u);
     }
-    const ids = [...byId.keys()].sort();
+    const ids = [...byId.keys()];
     const now = nowIso();
     const rejected = [];
 
-    const events = await withTransaction(this.pool, async client => {
-      const { rows } = await client.query(
-        `SELECT ${COLUMNS} FROM entities WHERE tenant = $1 AND id = ANY($2) ORDER BY id FOR UPDATE`, [tenant, ids]
-      );
-      const existing = new Map(rows.map(r => [r.id, toEntity(r)]));
+    // Timestamps as epoch ms: parsing timestamptz rows is a hot spot at ~10k rows/s
+    const { rows } = await this.pool.query(
+      `SELECT id, type, attrs, location, version,
+              extract(epoch FROM created_at) * 1000 AS c, extract(epoch FROM updated_at) * 1000 AS u
+         FROM entities WHERE tenant = $1 AND id = ANY($2)`, [tenant, ids]
+    );
+    const existing = new Map(rows.map(r => [r.id, fastEntity(r, r)]));
 
-      const writes = [];
-      for (const id of ids) {
-        const u = byId.get(id);
-        const before = existing.get(id) || null;
-        try {
-          const type = before ? before.type : u.type;
-          if (allowedTypes && !allowedTypes.includes(type)) throw forbidden(`type '${type}' not allowed`);
-          const next = before
-            ? model.applyPatch(before, { attrs: u.attrs, ...(u.location !== undefined && { location: u.location }) }, now)
-            : model.normalizeEntity({ id, type: u.type, attrs: u.attrs, location: u.location }, now);
-          if (before && JSON.stringify(next.attrs) === JSON.stringify(before.attrs)
-            && JSON.stringify(next.location ?? null) === JSON.stringify(before.location ?? null)) continue;
-          writes.push({ before, next: { ...next, type } });
-        } catch (error) {
-          rejected.push({ id, error: error.message });
-        }
+    const writes = [];
+    for (const id of ids) {
+      const u = byId.get(id);
+      const before = existing.get(id) || null;
+      try {
+        const type = before ? before.type : u.type;
+        if (allowedTypes && !allowedTypes.includes(type)) throw forbidden(`type '${type}' not allowed`);
+        const next = before
+          ? model.applyPatch(before, { attrs: u.attrs, ...(u.location !== undefined && { location: u.location }) }, now)
+          : model.normalizeEntity({ id, type: u.type, attrs: u.attrs, location: u.location }, now);
+        if (before && JSON.stringify(next.attrs) === JSON.stringify(before.attrs)
+          && JSON.stringify(next.location ?? null) === JSON.stringify(before.location ?? null)) continue;
+        writes.push({ before, next: { ...next, type } });
+      } catch (error) {
+        rejected.push({ id, error: error.message });
       }
-      if (!writes.length) return [];
+    }
+    if (!writes.length) return { written: 0, skipped: ids.length - rejected.length, rejected };
 
-      const { rows: saved } = await client.query(
-        `INSERT INTO entities AS e (tenant, id, type, attrs, location)
-         SELECT $1, i, t, a, l FROM unnest($2::text[], $3::text[], $4::jsonb[], $5::jsonb[]) AS x(i, t, a, l)
+    const history = this.history
+      ? writes.flatMap(w => this.history.rows(tenant, w.before, w.next))
+      : [];
+
+    // One JSON document instead of parallel arrays (pg escapes array elements in JS, slowly).
+    // version carries the expected version + 1: the update applies only if nobody wrote in between.
+    // History rows are inserted only for the entities actually written (join on the upsert result).
+    const { rows: saved } = await this.pool.query(
+      `WITH input AS (
+         SELECT * FROM jsonb_to_recordset($2::jsonb) AS x(i text, t text, a jsonb, l jsonb, v bigint)
+       ), up AS (
+         INSERT INTO entities AS e (tenant, id, type, attrs, location, version)
+         SELECT $1, i, t, a, l, COALESCE(v, 0) + 1 FROM input
          ON CONFLICT (tenant, id) DO UPDATE
-           SET attrs = EXCLUDED.attrs, location = EXCLUDED.location, version = e.version + 1, updated_at = now()
-         RETURNING ${COLUMNS}`,
-        [tenant, writes.map(w => w.next.id), writes.map(w => w.next.type),
-          writes.map(w => JSON.stringify(w.next.attrs)), writes.map(w => (w.next.location ? JSON.stringify(w.next.location) : null))]
-      );
-      const savedById = new Map(saved.map(r => [r.id, toEntity(r)]));
+           SET attrs = EXCLUDED.attrs, location = EXCLUDED.location, version = EXCLUDED.version, updated_at = now()
+           WHERE e.version = EXCLUDED.version - 1
+         RETURNING id, version, extract(epoch FROM created_at) * 1000 AS c, extract(epoch FROM updated_at) * 1000 AS u
+       ), hist AS (
+         INSERT INTO attribute_history (time, tenant, entity_id, attr, num, val, quality)
+         SELECT h.time, $1, h.entity, h.attr, h.num, h.val, h.quality
+           FROM jsonb_to_recordset($3::jsonb) AS h(time timestamptz, entity text, attr text, num float8, val jsonb, quality text)
+           JOIN up ON up.id = h.entity
+       )
+       SELECT * FROM up`,
+      [
+        tenant,
+        JSON.stringify(writes.map(w => ({ i: w.next.id, t: w.next.type, a: w.next.attrs, l: w.next.location || null, v: w.before ? w.before.version : null }))),
+        JSON.stringify(history)
+      ]
+    );
 
-      const historyRows = [];
-      const out = [];
-      for (const w of writes) {
-        const entity = savedById.get(w.next.id);
-        const relsBefore = w.before ? model.extractRelationships(w.before.attrs) : [];
-        await this._syncRelationships(client, tenant, entity.id, relsBefore, model.extractRelationships(entity.attrs));
-        if (this.history) historyRows.push(...this.history.rows(tenant, w.before, entity));
-        out.push([w.before ? 'update' : 'create', entity, w.before]);
-      }
-      if (this.history) await this.history.insert(client, tenant, historyRows);
-      return out;
-    });
+    const nextById = new Map(writes.map(w => [w.next.id, w]));
+    const events = [];
+    for (const r of saved) {
+      const w = nextById.get(r.id);
+      nextById.delete(r.id);
+      const entity = fastEntity(w.next, r);
+      const relsBefore = w.before ? model.extractRelationships(w.before.attrs) : [];
+      const relsAfter = model.extractRelationships(entity.attrs);
+      if (relsBefore.length || relsAfter.length) await this._syncRelationships(this.pool, tenant, entity.id, relsBefore, relsAfter);
+      events.push({ tenant, op: w.before ? 'update' : 'create', entity, previous: w.before });
+    }
+    if (events.length) this.emit('entitiesChanged', events);
 
-    events.forEach(([op, entity, previous]) => this._emit(tenant, op, entity, previous));
-    return { written: events.length, skipped: ids.length - events.length - rejected.length, rejected };
+    // Written concurrently by someone else (API): retry those on fresh state
+    let retried = { written: 0, skipped: 0, rejected: [] };
+    if (nextById.size) {
+      const conflicted = [...nextById.keys()].map(id => byId.get(id));
+      if (attempt < 3) retried = await this.ingestBatch(tenant, conflicted, { allowedTypes }, attempt + 1);
+      else conflicted.forEach(u => rejected.push({ id: u.id, error: 'concurrent update conflict' }));
+    }
+    return {
+      written: events.length + retried.written,
+      skipped: ids.length - writes.length - rejected.length + retried.skipped,
+      rejected: [...rejected, ...retried.rejected]
+    };
   }
 
   async _syncRelationships(client, tenant, id, before, after) {
@@ -484,6 +524,20 @@ function toEntity(row) {
   };
   if (row.location) entity.location = row.location;
   if (row.distance_m !== undefined && row.distance_m !== null) entity.distanceM = Math.round(row.distance_m * 10) / 10;
+  return entity;
+}
+
+/** Entity from its content (id, type, attrs, location) and a row with version and epoch-ms c/u. */
+function fastEntity(content, row) {
+  const entity = {
+    id: content.id,
+    type: content.type,
+    version: Number(row.version),
+    createdAt: new Date(Number(row.c)).toISOString(),
+    updatedAt: new Date(Number(row.u)).toISOString(),
+    attrs: content.attrs
+  };
+  if (content.location) entity.location = content.location;
   return entity;
 }
 

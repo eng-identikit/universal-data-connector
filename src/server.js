@@ -107,7 +107,7 @@ class UniversalDataConnector {
     });
 
     // Connector engine API (must be mounted before the broker router and its 404)
-    this.app.use('/api/v2/system', this.broker.systemGuard(), systemRoutes);
+    this.app.use('/api/v2/system', ...this.broker.systemMiddleware(), systemRoutes);
 
     // Broker API
     this.app.use('/api/v2', this.broker.router);

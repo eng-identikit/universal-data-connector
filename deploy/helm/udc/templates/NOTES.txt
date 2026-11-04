@@ -1,0 +1,17 @@
+Universal Data Connector {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}".
+
+Backend replicas: {{ .Values.backend.replicas }} (cluster mode: connectors and subscriptions are split through leases)
+Database: {{ include "udc.dbHost" . }}   NATS: {{ include "udc.natsUrl" . }}
+
+Admin login: {{ .Values.auth.adminUser }}
+{{- if not .Values.auth.existingSecret }}
+  kubectl get secret {{ include "udc.fullname" . }}-secrets -n {{ .Release.Namespace }} -o jsonpath='{.data.admin-password}' | base64 -d
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+Open: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+Open the UI locally:
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "udc.fullname" . }}-ui 8080:{{ .Values.service.uiPort }}
+  then http://localhost:8080
+{{- end }}

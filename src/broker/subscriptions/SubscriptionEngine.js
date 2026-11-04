@@ -28,6 +28,7 @@ class SubscriptionEngine {
     this.bus = bus;
     this.subs = new Map(); // id → compiled subscription
     this.byTenant = new Map(); // tenant → Set<id>
+    this.byType = new Map(); // tenant → { any: Set<id>, types: Map<type, Set<id>>, related: count }
     this.lastNotified = new LRUCache({ max: 200000 }); // `${sub}|${entity}` → { attr: value } for deadband
     this.throttle = new Map(); // `${sub}|${entity}` → { last, pending, timer }
     this.periodicTimers = new Map();
@@ -83,11 +84,32 @@ class SubscriptionEngine {
       sub.compiledFilter = null;
     }
     sub.idPattern = sub.select.idPattern ? globRegex(sub.select.idPattern) : null;
+    sub.expiresMs = sub.expiresAt ? Date.parse(sub.expiresAt) : null;
     this.subs.set(sub.id, sub);
     if (!this.byTenant.has(sub.tenant)) this.byTenant.set(sub.tenant, new Set());
     this.byTenant.get(sub.tenant).add(sub.id);
+    this._index(sub, true);
     if (sub.select.related) await this._refreshRelated(sub);
     this._schedulePeriodic(sub);
+  }
+
+  /**
+   * Per-tenant index by entity type: a change is only evaluated against the
+   * subscriptions selecting its type (or no type), not all of the tenant's.
+   */
+  _index(sub, add) {
+    let idx = this.byType.get(sub.tenant);
+    if (!idx) this.byType.set(sub.tenant, idx = { any: new Set(), types: new Map(), related: 0 });
+    const keys = sub.select.types?.length ? sub.select.types : null;
+    if (!keys) {
+      if (add) idx.any.add(sub.id); else idx.any.delete(sub.id);
+    } else {
+      for (const t of keys) {
+        if (!idx.types.has(t)) idx.types.set(t, new Set());
+        if (add) idx.types.get(t).add(sub.id); else idx.types.get(t).delete(sub.id);
+      }
+    }
+    if (sub.select.related) idx.related += add ? 1 : -1;
   }
 
   _unregister(id) {
@@ -95,6 +117,7 @@ class SubscriptionEngine {
     if (!sub) return;
     this.subs.delete(id);
     this.byTenant.get(sub.tenant)?.delete(id);
+    this._index(sub, false);
     this.related.delete(id);
     clearInterval(this.periodicTimers.get(id));
     this.periodicTimers.delete(id);
@@ -107,34 +130,60 @@ class SubscriptionEngine {
   }
 
   _active(sub) {
-    return sub.enabled && (!sub.expiresAt || Date.parse(sub.expiresAt) > Date.now()) && this.owns(sub);
+    return sub.enabled && (!sub.expiresMs || sub.expiresMs > Date.now()) && this.owns(sub);
   }
 
   // ─── Change processing ────────────────────────────────────────────────
 
+  /**
+   * Changes are evaluated synchronously (hot path, ~10k/s); only a change that
+   * moves relationships of a tenant with 'related' selectors needs an async
+   * refresh first, and then later changes of that tenant queue behind it.
+   */
   _enqueueChange(change) {
-    const prev = this.chain.get(change.tenant) || Promise.resolve();
-    const next = prev.then(() => this.handleChange(change)).catch(e => logger.error(`Subscription engine error: ${e.message}`));
+    const idx = this.byType.get(change.tenant);
+    if (!idx) return;
+    const needsRefresh = idx.related > 0 && relationshipsChanged(change.previous, change.entity);
+    const pending = this.chain.get(change.tenant);
+    if (!needsRefresh && !pending) {
+      try {
+        this._evaluate(change);
+      } catch (e) {
+        logger.error(`Subscription engine error: ${e.message}`);
+      }
+      return;
+    }
+    const next = (pending || Promise.resolve())
+      .then(() => (needsRefresh ? this._refreshTenantRelated(change.tenant) : null))
+      .then(() => this._evaluate(change))
+      .catch(e => logger.error(`Subscription engine error: ${e.message}`));
     this.chain.set(change.tenant, next);
     next.then(() => {
       if (this.chain.get(change.tenant) === next) this.chain.delete(change.tenant);
     });
   }
 
-  async handleChange({ tenant, op, entity, previous }) {
-    const ids = this.byTenant.get(tenant);
-    if (!ids || !ids.size) return;
+  /** Evaluates one change (tests and callers may await it). */
+  async handleChange(change) {
+    const idx = this.byType.get(change.tenant);
+    if (idx?.related > 0 && relationshipsChanged(change.previous, change.entity)) await this._refreshTenantRelated(change.tenant);
+    this._evaluate(change);
+  }
 
-    // Relationship changes can move entities in or out of 'related' selectors
-    if (relationshipsChanged(previous, entity)) {
-      for (const id of ids) {
-        const sub = this.subs.get(id);
-        if (sub?.select.related) await this._refreshRelated(sub);
-      }
+  async _refreshTenantRelated(tenant) {
+    for (const id of this.byTenant.get(tenant) || []) {
+      const sub = this.subs.get(id);
+      if (sub?.select.related) await this._refreshRelated(sub);
     }
+  }
 
+  _evaluate({ tenant, op, entity, previous }) {
+    const idx = this.byType.get(tenant);
+    if (!idx) return;
     const target = op === 'delete' ? previous : entity;
-    for (const id of ids) {
+    const byType = idx.types.get(target.type);
+    const candidates = byType ? [...idx.any, ...byType] : idx.any;
+    for (const id of candidates) {
       const sub = this.subs.get(id);
       if (!sub || !this._active(sub) || !sub.trigger.on.includes(op)) continue;
       if (!this._selects(sub, target)) continue;

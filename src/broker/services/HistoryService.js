@@ -44,7 +44,7 @@ class HistoryService {
         entity: entity.id,
         attr: name,
         num: typeof value === 'number' ? value : typeof value === 'boolean' ? Number(value) : null,
-        val: JSON.stringify(value),
+        val: value,
         quality: attr.quality || null
       });
     }
@@ -54,12 +54,13 @@ class HistoryService {
   /** Inserts rows inside the caller's transaction. */
   async insert(client, tenant, rows) {
     if (!rows.length) return;
+    // One JSON document: much cheaper to serialize than parallel pg arrays
     await client.query(
       `INSERT INTO attribute_history (time, tenant, entity_id, attr, num, val, quality)
-       SELECT t, $1, e, a, n, v::jsonb, q
-         FROM unnest($2::timestamptz[], $3::text[], $4::text[], $5::float8[], $6::text[], $7::text[]) AS x(t, e, a, n, v, q)`,
-      [tenant, rows.map(r => r.time), rows.map(r => r.entity), rows.map(r => r.attr),
-        rows.map(r => r.num), rows.map(r => r.val), rows.map(r => r.quality)]
+       SELECT x.time, $1, x.entity, x.attr, x.num, x.val, x.quality
+         FROM jsonb_to_recordset($2::jsonb)
+              AS x(time timestamptz, entity text, attr text, num float8, val jsonb, quality text)`,
+      [tenant, JSON.stringify(rows)]
     );
   }
 

@@ -2,6 +2,34 @@ const logger = require('../../utils/logger');
 
 const FLUSH_MS = parseInt(process.env.BROKER_INGEST_FLUSH_MS || '200', 10);
 const MAX_BATCH = 500;
+// Batches are split by hash(entity id): one partition is applied by one worker at a
+// time cluster-wide, so concurrent batches never wait on each other's row locks
+const PARTITIONS = parseInt(process.env.BROKER_INGEST_PARTITIONS || '16', 10);
+
+/**
+ * Jobs fetched together from one partition become one batch per (tenant,
+ * allowedTypes), keeping their order (later updates of an entity win).
+ */
+function mergeJobs(jobs) {
+  const groups = new Map();
+  for (const job of jobs) {
+    const key = `${job.tenant}|${job.allowedTypes ? job.allowedTypes.join(',') : ''}`;
+    const group = groups.get(key);
+    if (group) group.updates.push(...job.updates);
+    else groups.set(key, { tenant: job.tenant, allowedTypes: job.allowedTypes, updates: [...job.updates] });
+  }
+  return [...groups.values()];
+}
+
+/** Stable partition of an entity id (FNV-1a). */
+function partitionOf(id) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    h ^= id.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h % PARTITIONS;
+}
 
 /**
  * High-rate write path for connectors and POST /ingest.
@@ -26,7 +54,8 @@ class IngestService {
   async start() {
     this.timer = setInterval(() => this.flush(), FLUSH_MS);
     if (this.timer.unref) this.timer.unref();
-    await this.queue.consume((job) => this._apply(job), { concurrency: 4, batch: 20 });
+    // JetStream: one consumer per partition; memory: partitions serialized, up to PARTITIONS in parallel
+    await this.queue.consume((job) => this._apply(job), { concurrency: PARTITIONS, batch: 20, merge: mergeJobs });
   }
 
   push(tenant, update) {
@@ -39,9 +68,7 @@ class IngestService {
 
   async enqueue(tenant, updates, { allowedTypes = null } = {}) {
     this.stats.received += updates.length;
-    for (let i = 0; i < updates.length; i += MAX_BATCH) {
-      await this._publish({ tenant, updates: updates.slice(i, i + MAX_BATCH), allowedTypes });
-    }
+    await this._publishAll(tenant, updates, allowedTypes);
   }
 
   async flush() {
@@ -50,21 +77,36 @@ class IngestService {
     this.buffer = new Map();
     for (const [tenant, entities] of buffer) {
       const updates = [...entities.values()];
-      for (let i = 0; i < updates.length; i += MAX_BATCH) {
-        await this._publish({ tenant, updates: updates.slice(i, i + MAX_BATCH), allowedTypes: null })
-          .catch(error => logger.error(`Ingest publish failed (${updates.length} updates dropped): ${error.message}`));
-      }
+      await this._publishAll(tenant, updates, null)
+        .catch(error => logger.error(`Ingest publish failed (${updates.length} updates dropped): ${error.message}`));
     }
   }
 
-  async _publish(job) {
-    await this.queue.publish(`udc.ingest.${job.tenant.replace(/[.\s*>]/g, '_')}`, job);
-    this.stats.published += job.updates.length;
+  async _publishAll(tenant, updates, allowedTypes) {
+    const byPartition = new Map();
+    for (const u of updates) {
+      const p = partitionOf(u.id);
+      if (!byPartition.has(p)) byPartition.set(p, []);
+      byPartition.get(p).push(u);
+    }
+    const subject = `udc.ingest.${tenant.replace(/[.\s*>]/g, '_')}`;
+    await Promise.all([...byPartition].map(async ([partition, items]) => {
+      for (let i = 0; i < items.length; i += MAX_BATCH) {
+        const job = { tenant, updates: items.slice(i, i + MAX_BATCH), allowedTypes };
+        await this.queue.publish(subject, job, { partition });
+        this.stats.published += job.updates.length;
+      }
+    }));
   }
 
   async _apply(job) {
+    const started = Date.now();
     try {
       const result = await this.entities.ingestBatch(job.tenant, job.updates, { allowedTypes: job.allowedTypes });
+      // Moving average of the time to apply one batch (observability: /ingest/stats)
+      const ms = Date.now() - started;
+      this.stats.applyMsAvg = this.stats.applyMsAvg ? Math.round(this.stats.applyMsAvg * 0.9 + ms * 0.1) : ms;
+      this.stats.batches = (this.stats.batches || 0) + 1;
       this.stats.written += result.written;
       this.stats.skipped += result.skipped;
       this.stats.rejected += result.rejected.length;
@@ -89,3 +131,4 @@ class IngestService {
 }
 
 module.exports = IngestService;
+module.exports.PARTITIONS = PARTITIONS;

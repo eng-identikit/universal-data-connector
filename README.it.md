@@ -6,6 +6,21 @@
 
 Il progetto Universal Data Connector è stato completamente ristrutturato per fornire un sistema più semplice, flessibile e potente di raccolta e distribuzione dati da sorgenti industriali.
 
+## 🧭 Context broker
+
+L'UDC è anche un **context broker** standalone:
+- i dispositivi letti dai connettori diventano **entità** (stato corrente, relazioni, posizione, storico degli attributi);
+- i producer possono scrivere entità tramite l'API;
+- le **subscription** notificano i sistemi esterni via HTTP, MQTT, NATS o WebSocket, con filtri, deadband, throttling e dead-letter queue;
+- più istanze possono girare in **cluster**.
+
+```bash
+cp .env.example .env          # imposta BROKER_JWT_SECRET e BROKER_ADMIN_PASSWORD
+docker compose up -d --build  # UI su http://localhost:8080, API su /api/v2
+```
+
+Guida completa: [Context broker](./docs/Broker.it.md) (architettura, API, subscription, cluster, Helm, configurazione, prestazioni).
+
 ## 🎯 Caratteristiche Principali
 
 ### 1. **Formato Dati Unificato**
@@ -167,14 +182,14 @@ Dettagli: [Guida Storage](./docs/Storage.it.md), [endpoint History](./docs/API.i
 
 ### 6. **Stream in Tempo Reale (WebSocket)**
 
-Ogni pacchetto di dati mappati viene inviato ai client WebSocket sulla porta `3001` (`WS_PORT`):
+Le modifiche alle entità vengono inviate su un WebSocket autenticato, sulla porta dell'API (`/api/v2/stream?access_token=…&tenant=…`). I client si iscrivono a filtri sulle entità o a subscription con canale websocket:
 
 ```json
-{ "type": "data", "payload": { "sourceId": "plc-line1", "mappedData": { "id": "...", "measurements": [ ... ] }, "timestamp": "..." }, "timestamp": "..." }
-{ "type": "sourceStatus", "sourceId": "plc-line1", "status": "connected", "timestamp": "..." }
+{ "type": "subscribe", "id": "live", "entities": { "types": ["Press"], "idPattern": "plant1:*" } }
+{ "type": "entity", "sub": "live", "op": "update", "entity": { "id": "plant1:press07", "type": "Press", "attrs": { ... } } }
 ```
 
-La [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui/blob/main/README.it.md) usa questo stream per i grafici in tempo reale. I dettagli del protocollo sono nella [documentazione API](./docs/API.it.md#websocket-real-time-stream).
+La [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui/blob/main/README.it.md) usa questo stream per i grafici in tempo reale. I dettagli del protocollo sono nella [guida al broker](./docs/Broker.it.md#stream-in-tempo-reale).
 
 ## 📁 Struttura File Principali
 
@@ -415,7 +430,8 @@ const stats = engine.getStatistics();
 
 ## 📖 Ulteriori Risorse
 
-- [Documentazione API](./docs/API.it.md)
+- [Context broker](./docs/Broker.it.md): entità, subscription, storico, comandi, cluster, deploy
+- [Documentazione API](./docs/API.it.md) (endpoint del motore dei connettori, ora sotto `/api/v2/system`)
 - [Guida alla Configurazione](./docs/Configuration.it.md)
 - [Configurazione Dinamica](./docs/DynamicConfiguration.it.md)
 - [Guida al Mapping](./docs/Mapping.it.md)

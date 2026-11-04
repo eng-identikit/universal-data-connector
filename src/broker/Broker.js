@@ -1,11 +1,12 @@
 const os = require('os');
 const crypto = require('crypto');
+const { monitorEventLoopDelay } = require('perf_hooks');
 const express = require('express');
 const logger = require('../utils/logger');
 const { createPool } = require('./db/pool');
 const { migrate } = require('./db/migrate');
 const { BrokerError, unavailable } = require('./errors');
-const { authenticate, requireTenantRole } = require('./auth/middleware');
+const { authenticate, requireTenantRole, requireSuperadmin } = require('./auth/middleware');
 const EntityService = require('./services/EntityService');
 const UserService = require('./services/UserService');
 const TenantService = require('./services/TenantService');
@@ -22,6 +23,8 @@ const StreamHub = require('./realtime/StreamHub');
 const IngestService = require('./ingest/IngestService');
 const ConnectorBridge = require('./ingest/ConnectorBridge');
 const CommandService = require('./commands/CommandService');
+const ClusterCoordinator = require('./cluster/ClusterCoordinator');
+const ConfigSync = require('./cluster/ConfigSync');
 const authRoutes = require('./api/authRoutes');
 const adminRoutes = require('./api/adminRoutes');
 const entityRoutes = require('./api/entityRoutes');
@@ -41,6 +44,9 @@ const RETRY_INTERVAL_MS = 5000;
 class Broker {
   constructor() {
     this.instanceId = `${os.hostname()}-${process.pid}-${crypto.randomBytes(2).toString('hex')}`;
+    // Event-loop delay: the saturation signal of a Node instance (shown on the Cluster page)
+    this.loopDelay = monitorEventLoopDelay({ resolution: 20 });
+    this.loopDelay.enable();
     this.pool = createPool();
     this.pool.on('error', (error) => logger.error(`Broker DB pool error: ${error.message}`));
     this.nats = new NatsClient();
@@ -69,7 +75,7 @@ class Broker {
     this.ingest = new IngestService({
       entities: this.services.entities,
       queue: this.nats.enabled
-        ? new JetStreamQueue(this.nats, { stream: 'UDC_INGEST', durable: 'udc-ingest' })
+        ? new JetStreamQueue(this.nats, { stream: 'UDC_INGEST', durable: 'udc-ingest', partitions: IngestService.PARTITIONS })
         : new MemoryQueue({ name: 'ingest' })
     });
     this.bridge = new ConnectorBridge({ ingest: this.ingest });
@@ -82,8 +88,31 @@ class Broker {
       subscriptions: this.services.subscriptions
     });
 
+    // Several instances on the same database and NATS: share connectors and subscriptions
+    this.cluster = null;
+    this.configSync = null;
+    if (process.env.BROKER_CLUSTER === 'true') {
+      if (this.nats.enabled) {
+        this.cluster = new ClusterCoordinator({
+          pool: this.pool,
+          instanceId: this.instanceId,
+          engine: this.engine,
+          metrics: () => this.metrics(),
+          ingestPartitions: IngestService.PARTITIONS
+        });
+        this.ingest.queue.setPartitionFilter((p) => this.cluster.ownsIngestPartition(p));
+        // BROKER_CONFIG_SYNC=false keeps config files local (e.g. instances with different sources on purpose)
+        if (process.env.BROKER_CONFIG_SYNC !== 'false') {
+          this.configSync = new ConfigSync({ pool: this.pool, bus: this.bus, instanceId: this.instanceId });
+        }
+      } else {
+        logger.warn('BROKER_CLUSTER=true ignored: clustering needs NATS_URL');
+      }
+    }
+
     // Committed entity writes fan out to every instance through the bus
     this.services.entities.on('entityChanged', (change) => this.bus.publish(change));
+    this.services.entities.on('entitiesChanged', (changes) => this.bus.publishMany(changes));
     // Subscription CRUD: apply here before answering, then tell the other instances
     this.services.subscriptions.onChange = async (tenant, id) => {
       await this.engine.reload(id);
@@ -114,6 +143,8 @@ class Broker {
         await this.worker.start();
         await this.ingest.start();
         await this.engine.start();
+        if (this.cluster) await this.cluster.start();
+        if (this.configSync) this.configSync.start();
         this.messagingReady = true;
       }
       this.ready = true;
@@ -135,11 +166,14 @@ class Broker {
   attachEngine(engine) {
     this.bridge.attach(engine);
     this.services.commands.attach(engine);
+    if (this.cluster) this.cluster.attachConnectorEngine(engine);
+    if (this.configSync) this.configSync.attach(engine);
   }
 
   async stop() {
     this.stopped = true;
     clearTimeout(this.retryTimer);
+    if (this.cluster) await this.cluster.stop();
     await this.ingest.stop().catch(() => {});
     await this.engine.stop().catch(() => {});
     this.services.commands.close();
@@ -158,6 +192,7 @@ class Broker {
       instance: this.instanceId,
       database: this.dbReady,
       geo: this.services.entities.geoEnabled,
+      cluster: !!this.cluster,
       messaging: this.nats.enabled ? (this.nats.connected ? 'nats' : 'nats-disconnected') : 'memory',
       error: this.lastError
     };
@@ -182,6 +217,40 @@ class Broker {
     };
   }
 
+  /** Runtime metrics of this instance; the loop delay window restarts at each call. */
+  metrics() {
+    const m = {
+      loopDelayP50Ms: Math.round(this.loopDelay.percentile(50) / 1e6),
+      loopDelayP99Ms: Math.round(this.loopDelay.percentile(99) / 1e6),
+      memoryMb: Math.round(process.memoryUsage().rss / 1048576),
+      stream: this.hub.stats(),
+      ingest: { applyMsAvg: this.ingest.stats.applyMsAvg ?? null, written: this.ingest.stats.written, rejected: this.ingest.stats.rejected }
+    };
+    this.loopDelay.reset();
+    return m;
+  }
+
+  /** Middleware chain for /api/v2/system: auth guard, plus config sharing in a cluster. */
+  systemMiddleware() {
+    const chain = [this.systemGuard()];
+    if (this.configSync) chain.push(this.configSync.middleware());
+    return chain;
+  }
+
+  /** Instances, leases and queue backlogs, for the Cluster page. */
+  async clusterStatus() {
+    const [notify, ingest] = await Promise.all([this.notifyQueue.info(), this.ingest.queue.info()]);
+    const queues = { notify, ingest, ingestStats: this.ingest.stats };
+    if (this.cluster) return { enabled: true, ...(await this.cluster.status()), queues };
+    return {
+      enabled: false,
+      self: this.instanceId,
+      instances: [{ id: this.instanceId, host: os.hostname(), alive: true, startedAt: null, heartbeatAt: new Date().toISOString(), info: this.metrics() }],
+      leases: [],
+      queues
+    };
+  }
+
   _buildRouter() {
     const router = express.Router();
     const auth = authenticate(this.services);
@@ -197,6 +266,7 @@ class Broker {
     router.use(entityRoutes(deps));
     router.use(subscriptionRoutes(deps));
     router.use(dataRoutes(deps));
+    router.get('/cluster', requireSuperadmin, (req, res, next) => this.clusterStatus().then(s => res.json(s)).catch(next));
     router.use(adminRoutes(deps));
 
     router.use((req, res) => res.status(404).json({ error: 'NotFound', message: `No route for ${req.method} ${req.originalUrl}` }));

@@ -266,7 +266,7 @@ class DataConnectorEngine extends EventEmitter {
           await this.createConnector(sourceConfig);
 
           // Auto-start if engine is running
-          if (this.isRunning) {
+          if (this.isRunning && this.canRun(sourceConfig.id)) {
             await this.startConnector(sourceConfig.id);
           }
         }
@@ -918,8 +918,8 @@ class DataConnectorEngine extends EventEmitter {
         logger.info(`Active transports: ${activeTransports.join(', ')}`);
       }
 
-      // Start all connectors
-      const startPromises = Array.from(this.connectors.values()).map(async (connectorInfo) => {
+      // Start all connectors this instance may run (in a cluster each runs on one instance)
+      const startPromises = Array.from(this.connectors.values()).filter(c => this.canRun(c.config.id)).map(async (connectorInfo) => {
         try {
           await connectorInfo.connector.start();
           logger.info(`Started connector '${connectorInfo.config.id}'`);
@@ -981,6 +981,23 @@ class DataConnectorEngine extends EventEmitter {
       logger.error('Failed to stop Data Connector Engine:', error);
       throw error;
     }
+  }
+
+  /**
+   * Cluster gate: set by the broker's cluster coordinator so that each connector
+   * runs on exactly one instance. Without a gate every connector runs here.
+   */
+  setConnectorGate(gate) {
+    this.connectorGate = gate;
+  }
+
+  canRun(sourceId) {
+    return !this.connectorGate || this.connectorGate(sourceId);
+  }
+
+  /** True when the connector exists and is meant to run on this instance. */
+  isConnectorActive(sourceId) {
+    return this.connectors.has(sourceId) && this.canRun(sourceId);
   }
 
   async startConnector(sourceId) {
