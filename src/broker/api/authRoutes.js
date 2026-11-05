@@ -66,6 +66,10 @@ module.exports = function authRoutes({ services, authenticate, broker }) {
   }));
 
   router.get('/me', authenticate, asyncHandler(async (req, res) => {
+    if (req.auth.kind === 'service') {
+      const k = req.auth.apiKey;
+      return res.json({ kind: 'service', name: k.name, isSuperadmin: true });
+    }
     if (req.auth.kind === 'apikey') {
       const k = req.auth.apiKey;
       return res.json({ kind: 'apikey', name: k.name, tenant: k.tenant, role: k.role, allowedTypes: k.allowed_types });

@@ -79,6 +79,8 @@ services:
       BROKER_JWT_SECRET: ${BROKER_JWT_SECRET:?set BROKER_JWT_SECRET in .env}
       BROKER_ADMIN_USER: ${BROKER_ADMIN_USER:-admin}
       BROKER_ADMIN_PASSWORD: ${BROKER_ADMIN_PASSWORD:?set BROKER_ADMIN_PASSWORD in .env}
+      # Service key the orchestrator (ui-api) uses to configure this instance
+      BROKER_SERVICE_KEY: ${BROKER_SERVICE_KEY:-}
       # Empty = not used. Point them to the bundled services (nats://nats:4222,
       # mqtt://mqtt:1883) or to external ones.
       NATS_URL: ${COMPOSE_NATS_URL:-}
@@ -92,6 +94,37 @@ services:
       - udc-logs:/app/logs
     ports:
       - "3000:3000"
+    restart: unless-stopped
+
+  # Backend for frontend: catalog of UDC instances, board layout, UI users
+  ui-api:
+    build: ../universal-data-connector-ui-api
+    depends_on:
+      db:
+        condition: service_healthy
+      udc:
+        condition: service_started
+    environment:
+      UI_DB_HOST: db
+      UI_DB_USER: ${BROKER_DB_USER:-udc}
+      UI_DB_PASSWORD: ${BROKER_DB_PASSWORD:-udc-dev-password}
+      UI_DB_NAME: ${UI_DB_NAME:-udc_ui}
+      UI_JWT_SECRET: ${UI_JWT_SECRET:?set UI_JWT_SECRET in .env}
+      UI_ENCRYPTION_KEY: ${UI_ENCRYPTION_KEY:?set UI_ENCRYPTION_KEY in .env}
+      UI_ADMIN_USER: ${UI_ADMIN_USER:-admin}
+      UI_ADMIN_PASSWORD: ${UI_ADMIN_PASSWORD:-}
+      # The UDC of this stack, registered on the first start
+      UDC_DEFAULT_NAME: ${UDC_DEFAULT_NAME:-UDC}
+      UDC_DEFAULT_URL: http://udc:3000
+      UDC_DEFAULT_PUBLIC_URL: ${UDC_PUBLIC_URL:-}
+      UDC_DEFAULT_KEY: ${BROKER_SERVICE_KEY:-}
+      KEYCLOAK_URL: ${KEYCLOAK_URL:-}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-}
+      KEYCLOAK_CLIENT: ${KEYCLOAK_CLIENT:-}
+      KEYCLOAK_UI_CLIENT: ${KEYCLOAK_UI_CLIENT:-}
+      KEYCLOAK_AUTHORIZED_ROLE: ${KEYCLOAK_AUTHORIZED_ROLE:-}
+    ports:
+      - "${UI_API_PORT:-9000}:9000"
     restart: unless-stopped
 
   ui:

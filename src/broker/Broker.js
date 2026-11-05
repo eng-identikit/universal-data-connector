@@ -6,7 +6,7 @@ const logger = require('../utils/logger');
 const { createPool } = require('./db/pool');
 const { migrate } = require('./db/migrate');
 const { BrokerError, unavailable } = require('./errors');
-const { authenticate, requireTenantRole, requireSuperadmin } = require('./auth/middleware');
+const { authenticate, requireTenantRole, requireSuperadmin, isSuperadmin } = require('./auth/middleware');
 const EntityService = require('./services/EntityService');
 const UserService = require('./services/UserService');
 const TenantService = require('./services/TenantService');
@@ -146,6 +146,7 @@ class Broker {
       if (!this.dbReady) {
         await migrate(this.pool);
         await this.services.sessions.start();
+        await this.services.apiKeys.ensureBootstrapServiceKey();
         await this.services.users.bootstrap();
         await this.services.history.configureRetention();
         await this.services.entities.detectGeo();
@@ -256,7 +257,7 @@ class Broker {
     return (req, res, next) => {
       if (!this.ready) return res.status(503).json({ error: 'Unavailable', message: 'Broker is starting' });
       this.authenticate(req, res, (error) => {
-        if (!error && req.method !== 'GET' && !(req.auth.kind === 'user' && req.auth.isSuperadmin)) {
+        if (!error && req.method !== 'GET' && !isSuperadmin(req.auth)) {
           error = new BrokerError(403, 'Forbidden', 'Superadmin required');
         }
         if (!error) return next();

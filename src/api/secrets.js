@@ -70,7 +70,7 @@ function restoreMasked(incoming, stored) {
 
 /** True when the caller (set by the broker's system guard) is a superadmin. */
 function isSuperadmin(req) {
-  return req.auth?.kind === 'user' && !!req.auth.isSuperadmin;
+  return req.auth?.kind === 'service' || (req.auth?.kind === 'user' && !!req.auth.isSuperadmin);
 }
 
 /** Secrets in clear for a superadmin, masked for everybody else. */

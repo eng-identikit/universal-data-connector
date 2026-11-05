@@ -218,6 +218,42 @@ async function main() {
     assert.deepStrictEqual(full.entities.map(e => e.id).sort(), ['a1', 'b1']);
   });
 
+  await test('service keys act as a superadmin on any tenant; only users create them', async () => {
+    const created = expectStatus(await call('POST', '/service-keys', { token: adminToken, body: { name: `orchestrator-${RUN}` } }), 201);
+    assert.strictEqual(created.scope, 'service');
+    assert.strictEqual(created.tenant, null);
+    const key = created.key;
+    expectStatus(await call('GET', '/auth/me', { apiKey: key }), 200);
+    // Any tenant through X-Tenant, users and service keys administration
+    expectStatus(await call('GET', '/entities', { token: key, tenant: TENANT }), 200);
+    const tenants = expectStatus(await call('GET', '/tenants', { token: key }), 200).tenants;
+    assert.ok(tenants.some(t => t.id === TENANT));
+    expectStatus(await call('GET', '/users', { token: key }), 200);
+    expectStatus(await call('POST', '/subscriptions', {
+      token: key, tenant: TENANT, body: { name: 'by service', notify: { channel: 'websocket' } }
+    }), 201);
+    expectStatus(await call('GET', '/entities'), 401);
+    expectStatus(await call('GET', '/entities', { token: key }), 400); // X-Tenant is required
+    // A service key cannot mint other service keys; revocation is immediate
+    expectStatus(await call('POST', '/service-keys', { token: key, body: { name: 'more' } }), 403);
+    expectStatus(await call('DELETE', `/service-keys/${created.id}`, { token: adminToken }), 204);
+    expectStatus(await call('GET', '/users', { token: key }), 401);
+    // A tenant key is not a service key
+    const tenantKey = expectStatus(await call('POST', '/apikeys', { token: adminToken, tenant: TENANT, body: { name: 'plain', role: 'admin' } }), 201).key;
+    expectStatus(await call('GET', '/users', { apiKey: tenantKey }), 403);
+  });
+
+  await test('BROKER_SERVICE_KEY provisions a service key', async () => {
+    const key = `udc_boot${RUN}_${crypto.randomBytes(18).toString('base64url')}`;
+    await broker.services.apiKeys.ensureBootstrapServiceKey(key);
+    await broker.services.apiKeys.ensureBootstrapServiceKey(key); // idempotent
+    expectStatus(await call('GET', '/users', { token: key }), 200);
+    const { serviceKeys } = expectStatus(await call('GET', '/service-keys', { token: adminToken }), 200);
+    const boot = serviceKeys.filter(k => k.prefix === `udc_${key.slice(4, 12)}_`);
+    assert.strictEqual(boot.length, 1);
+    expectStatus(await call('DELETE', `/service-keys/${boot[0].id}`, { token: adminToken }), 204);
+  });
+
   // Cleanup
   expectStatus(await call('DELETE', `/tenants/${TENANT}`, { token: adminToken }), 204);
   await broker.revokeUserSessions(admin.id);

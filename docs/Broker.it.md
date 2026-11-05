@@ -67,6 +67,8 @@ Le subscription HTTP e WebSocket non richiedono nessuno dei due. Una subscriptio
 | Cluster con Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 repliche, `UDC_REPLICAS` per cambiarle) |
 | Kubernetes | `helm install udc deploy/helm/udc` (vedi `values.yaml`: database e NATS inclusi oppure esterni, NATS e MQTT opzionali) |
 
+Lo stack avvia anche **universal-data-connector-ui-api** su `:9000`, il backend della UI orchestratore: registra questo UDC con `BROKER_SERVICE_KEY` (vedi il suo README).
+
 La UI è su **http://localhost:8080**: nginx inoltra `/api` e lo stream WebSocket al backend. L'API è anche su `:3000` in istanza singola. Il primo avvio crea il tenant `default` e il superadmin `BROKER_ADMIN_USER`; se `BROKER_ADMIN_PASSWORD` manca, la password viene generata e scritta nel log una volta sola.
 
 ## Modello entità
@@ -342,6 +344,12 @@ Le subscription accettano `select.bbox`.
 **API key**
 - Salvate come hash SHA-256 e mostrate una sola volta.
 - Hanno un ruolo, una scadenza e un elenco opzionale di `allowedTypes`, che limita sia la lettura sia la scrittura.
+- Accettate anche come bearer token (`Authorization: Bearer udc_...`), per i client che inviano solo bearer token.
+
+**Chiavi di servizio**
+- API key non legate a un tenant che agiscono come un superadmin: qualsiasi tenant tramite `X-Tenant`, utenti, configurazione dei connettori (`/system`). L'orchestratore (universal-data-connector-ui-api) configura un'istanza con una di queste.
+- Le creano gli utenti superadmin (`GET`/`POST /service-keys`, `DELETE /service-keys/:id`); una chiave di servizio non può crearne altre.
+- `BROKER_SERVICE_KEY` (`udc_` seguito da almeno 20 caratteri) ne registra una all'avvio, così un deployment collega l'orchestratore senza passaggi manuali.
 
 ## Cluster
 
@@ -388,6 +396,7 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 | `BROKER_INGEST_PARTITIONS` | 16 | Partizioni dell'ingest (uguale su tutte le istanze) |
 | `BROKER_HISTORY` / `BROKER_HISTORY_RETENTION` | `on` / — | Storico degli attributi e sua retention |
 | `BROKER_MQTT_URL` | — | Broker MQTT predefinito per le notifiche |
+| `BROKER_SERVICE_KEY` | — | Chiave di servizio registrata all'avvio (accesso dell'orchestratore) |
 | `BROKER_REDIS_URL` | — | Redis per sessioni e limite ai login (altrimenti PostgreSQL / per istanza) |
 | `BROKER_AUTH_LOG_RETENTION_DAYS` | 90 | Conservazione dello storico accessi |
 | `BROKER_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Proxy di cui fidarsi per `X-Forwarded-For` |

@@ -7,6 +7,7 @@ const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
  * Resolves the caller from a bearer token or an API key:
  *   user:   { kind: 'user', user, isSuperadmin, memberships: Map<tenant, role>, tokenExp, sessionId }
  *   apikey: { kind: 'apikey', apiKey, tenant, role, allowedTypes }
+ *   service key: { kind: 'service', apiKey, isSuperadmin: true } (any tenant, like a superadmin)
  * Throws 401 when neither is valid. A token is valid only while its session exists.
  */
 async function resolveCaller({ users, apiKeys, sessions }, { token, apiKey }) {
@@ -32,6 +33,7 @@ async function resolveCaller({ users, apiKeys, sessions }, { token, apiKey }) {
   if (apiKey) {
     const key = await apiKeys.resolve(apiKey);
     if (!key) throw unauthorized('Invalid, expired or revoked API key');
+    if (key.scope === 'service') return { kind: 'service', apiKey: key, isSuperadmin: true, memberships: new Map() };
     return { kind: 'apikey', apiKey: key, tenant: key.tenant, role: key.role, allowedTypes: key.allowed_types };
   }
   throw unauthorized();
@@ -96,9 +98,12 @@ function requireTenantRole(minRole, services) {
   };
 }
 
+/** Superadmin users and service keys. */
+const isSuperadmin = (auth) => !!auth && (auth.kind === 'service' || (auth.kind === 'user' && auth.isSuperadmin));
+
 function requireSuperadmin(req, res, next) {
-  if (req.auth?.kind === 'user' && req.auth.isSuperadmin) return next();
+  if (isSuperadmin(req.auth)) return next();
   next(forbidden('Superadmin required'));
 }
 
-module.exports = { authenticate, requireTenantRole, requireSuperadmin, resolveCaller, resolveTenant, ROLE_RANK };
+module.exports = { authenticate, requireTenantRole, requireSuperadmin, isSuperadmin, resolveCaller, resolveTenant, ROLE_RANK };

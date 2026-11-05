@@ -1,5 +1,6 @@
 const { generateApiKey, hashApiKey } = require('../auth/tokens');
 const { assertEntityType } = require('../model/entityModel');
+const logger = require('../../utils/logger');
 const { badRequest, notFound } = require('../errors');
 const { ROLES } = require('./TenantService');
 
@@ -47,6 +48,59 @@ class ApiKeyService {
     return { ...toApiKey(rows[0]), key };
   }
 
+  // ─── Service keys: no tenant, superadmin powers (orchestrator access) ──────
+
+  async listService() {
+    const { rows } = await this.pool.query(
+      `SELECT k.*, u.username AS created_by_username FROM api_keys k
+         LEFT JOIN users u ON u.id = k.created_by
+        WHERE k.scope = 'service' ORDER BY k.created_at DESC`
+    );
+    return rows.map(toApiKey);
+  }
+
+  async createService({ name, expiresAt }, createdBy) {
+    if (typeof name !== 'string' || !name.trim()) throw badRequest('name is required');
+    let expires = null;
+    if (expiresAt) {
+      expires = new Date(expiresAt);
+      if (Number.isNaN(expires.getTime()) || expires <= new Date()) throw badRequest('expiresAt must be a future date');
+    }
+    const { key, prefix, hash } = generateApiKey();
+    const { rows } = await this.pool.query(
+      `INSERT INTO api_keys (tenant, scope, name, key_prefix, key_hash, role, created_by, expires_at)
+       VALUES (NULL, 'service', $1, $2, $3, 'admin', $4, $5) RETURNING *`,
+      [name.trim(), prefix, hash, createdBy || null, expires]
+    );
+    return { ...toApiKey(rows[0]), key };
+  }
+
+  async revokeService(id) {
+    const { rowCount } = await this.pool.query(
+      "UPDATE api_keys SET revoked_at = now() WHERE scope = 'service' AND id = $1 AND revoked_at IS NULL", [id]
+    );
+    if (!rowCount) throw notFound(`Active service key '${id}' not found`);
+  }
+
+  /**
+   * BROKER_SERVICE_KEY: a service key provisioned by the deployment (e.g. Compose
+   * wiring the orchestrator to this instance). Registered once, by hash.
+   */
+  async ensureBootstrapServiceKey(key = process.env.BROKER_SERVICE_KEY) {
+    if (!key) return;
+    if (!/^udc_[A-Za-z0-9_-]{20,}$/.test(key)) {
+      logger.warn('BROKER_SERVICE_KEY ignored: it must start with udc_ followed by at least 20 letters, digits, _ or -');
+      return;
+    }
+    const prefix = key.slice(4, 12);
+    await this.pool.query(
+      `INSERT INTO api_keys (tenant, scope, name, key_prefix, key_hash, role)
+       VALUES (NULL, 'service', 'bootstrap (BROKER_SERVICE_KEY)', $1, $2, 'admin')
+       ON CONFLICT (key_hash) DO NOTHING`,
+      [prefix, hashApiKey(key)]
+    );
+  }
+
   async revoke(tenant, id) {
     const { rowCount } = await this.pool.query(
       'UPDATE api_keys SET revoked_at = now() WHERE tenant = $1 AND id = $2 AND revoked_at IS NULL', [tenant, id]
@@ -78,6 +132,7 @@ function toApiKey(row) {
   return {
     id: row.id,
     tenant: row.tenant,
+    scope: row.scope,
     name: row.name,
     prefix: `udc_${row.key_prefix}_`,
     role: row.role,

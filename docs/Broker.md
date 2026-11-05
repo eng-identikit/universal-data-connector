@@ -67,6 +67,8 @@ HTTP and WebSocket subscriptions need neither. A subscription that relies on a d
 | Cluster with Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 replicas; `UDC_REPLICAS` changes the count) |
 | Kubernetes | `helm install udc deploy/helm/udc` (see `values.yaml`: database and NATS bundled or external, NATS and MQTT optional) |
 
+The stack also starts **universal-data-connector-ui-api** on `:9000`, the backend of the orchestrator UI: it registers this UDC with `BROKER_SERVICE_KEY` (see its README).
+
 The UI is at **http://localhost:8080**: nginx forwards `/api` and the WebSocket stream to the backend. In single-instance mode the API is also on `:3000`. The first start creates the `default` tenant and the superadmin `BROKER_ADMIN_USER`; if `BROKER_ADMIN_PASSWORD` is missing, a password is generated and logged once.
 
 ## Entity model
@@ -342,6 +344,12 @@ Subscriptions accept `select.bbox`.
 **API keys**
 - Stored as SHA-256 hashes and shown only once.
 - Each key has a role, an expiry and an optional `allowedTypes` list, which restricts both reads and writes.
+- Also accepted as a bearer token (`Authorization: Bearer udc_...`), for clients that only send bearer tokens.
+
+**Service keys**
+- API keys not bound to a tenant that act as a superadmin: any tenant through `X-Tenant`, users, connector configuration (`/system`). The orchestrator (universal-data-connector-ui-api) configures an instance with one.
+- Created by superadmin users (`GET`/`POST /service-keys`, `DELETE /service-keys/:id`); a service key cannot create others.
+- `BROKER_SERVICE_KEY` (`udc_` followed by at least 20 characters) provisions one at startup, so a deployment can wire the orchestrator without manual steps.
 
 ## Cluster
 
@@ -388,6 +396,7 @@ With `BROKER_CLUSTER=true` (and NATS), several instances share the work through 
 | `BROKER_INGEST_PARTITIONS` | 16 | Ingest partitions (same value on every instance) |
 | `BROKER_HISTORY` / `BROKER_HISTORY_RETENTION` | `on` / — | Attribute history and its retention |
 | `BROKER_MQTT_URL` | — | Default MQTT broker for notifications |
+| `BROKER_SERVICE_KEY` | — | Service key registered at startup (orchestrator access) |
 | `BROKER_REDIS_URL` | — | Redis for sessions and login limits (otherwise PostgreSQL / per instance) |
 | `BROKER_AUTH_LOG_RETENTION_DAYS` | 90 | Access log retention |
 | `BROKER_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Proxies whose `X-Forwarded-For` is trusted |

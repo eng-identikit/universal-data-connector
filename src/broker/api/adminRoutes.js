@@ -5,17 +5,20 @@ const { badRequest, forbidden, notFound } = require('../errors');
 const { ROLES } = require('../services/TenantService');
 const { parseIntParam } = require('../services/EntityService');
 
-// Managing members and API keys needs a user: an API key must not mint other
-// keys or grant roles (it could escape its own allowedTypes restriction)
+// Managing members and API keys needs a user or a service key: a tenant API key
+// must not mint other keys or grant roles (it could escape its own allowedTypes restriction)
 function userOnly(req, res, next) {
-  next(req.auth.kind === 'user' ? undefined : forbidden('This operation needs a user, not an API key'));
+  next(req.auth.kind === 'apikey' ? forbidden('This operation needs a user, not an API key') : undefined);
 }
+
+/** Who did it, for the access log: the user, or the service key's name. */
+const actorName = (auth) => (auth.kind === 'user' ? auth.user.username : `service:${auth.apiKey.name}`);
 
 /** Users, sessions and access log (superadmin), tenants, tenant members and API keys. Mounted after authenticate. */
 module.exports = function adminRoutes({ services, tenantRole, broker }) {
   const router = express.Router();
   const { users, tenants, apiKeys, sessions, authEvents } = services;
-  const actorOf = (req) => ({ actor: req.auth.user.username, ip: req.ip });
+  const actorOf = (req) => ({ actor: actorName(req.auth), ip: req.ip });
 
   // ─── Users ──────────────────────────────────────────────────────────────
   router.get('/users', requireSuperadmin, asyncHandler(async (req, res) => {
@@ -52,9 +55,24 @@ module.exports = function adminRoutes({ services, tenantRole, broker }) {
   }));
 
   router.delete('/users/:id', requireSuperadmin, asyncHandler(async (req, res) => {
-    if (req.params.id === req.auth.user.id) throw badRequest('You cannot delete yourself');
+    if (req.params.id === req.auth.user?.id) throw badRequest('You cannot delete yourself');
     await users.remove(req.params.id);
     await broker.revokeUserSessions(req.params.id);
+    res.status(204).end();
+  }));
+
+  // ─── Service keys (superadmin users): orchestrator access ────────────────
+  router.get('/service-keys', requireSuperadmin, asyncHandler(async (req, res) => {
+    res.json({ serviceKeys: await apiKeys.listService() });
+  }));
+
+  router.post('/service-keys', requireSuperadmin, userOnly, asyncHandler(async (req, res) => {
+    if (req.auth.kind !== 'user') throw forbidden('Service keys are created by superadmin users');
+    res.status(201).json(await apiKeys.createService(req.body || {}, req.auth.user.id));
+  }));
+
+  router.delete('/service-keys/:id', requireSuperadmin, asyncHandler(async (req, res) => {
+    await apiKeys.revokeService(req.params.id);
     res.status(204).end();
   }));
 
