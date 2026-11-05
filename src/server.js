@@ -125,6 +125,13 @@ class UniversalDataConnector {
 
     // Global error handler
     this.app.use((error, req, res, next) => {
+      // Client errors raised by body parsing (invalid JSON, body too large, ...)
+      if (error.expose && error.status >= 400 && error.status < 500) {
+        return res.status(error.status).json({
+          error: error.type === 'entity.parse.failed' ? 'BadRequest' : 'ClientError',
+          message: error.type === 'entity.parse.failed' ? 'Request body is not valid JSON' : error.message
+        });
+      }
       logger.error('Unhandled error:', error);
       res.status(500).json({
         error: 'Internal Server Error',

@@ -306,7 +306,7 @@ Subscriptions accept `select.bbox`.
 
 **Sessions and tokens**
 - Every login opens a session; the 15-minute access token and the 7-day refresh token carry its id. A token is accepted only while its session exists, so a logout or a revocation applies from the next request on every instance, and the session's open streams are closed with `4001`.
-- Refresh tokens are single use: each refresh hands out a new one. Presenting an already used refresh token means it was copied, and the whole session is revoked (`refresh_reuse` in the access log).
+- Refresh tokens are single use: each refresh hands out a new one. Presenting an already used refresh token means it was copied, and the whole session is revoked (`refresh_reuse` in the access log). The token replaced last is still accepted for 30 seconds (`BROKER_REFRESH_REUSE_INTERVAL_MS`), so two browser tabs refreshing at the same moment do not end the session.
 - Changing the password, disabling or deleting a user ends all of its sessions.
 - Sessions live in Redis (`BROKER_REDIS_URL`) or, without it, in PostgreSQL. The Administration page lists them (user, address, client, start, last activity) and revokes one or all of a user's sessions.
 - The access log (`auth_events`) records logins, failed and blocked attempts, logouts, reused refresh tokens and revocations, with address and client. It is kept for `BROKER_AUTH_LOG_RETENTION_DAYS` (90) days.

@@ -11,6 +11,9 @@ const assert = require('assert');
 const crypto = require('crypto');
 const express = require('express');
 const WebSocket = require('ws');
+
+// Short reuse interval so the test can step past it
+process.env.BROKER_REFRESH_REUSE_INTERVAL_MS = '1000';
 const Broker = require('../src/broker/Broker');
 
 const RUN = crypto.randomBytes(3).toString('hex');
@@ -101,7 +104,8 @@ async function main() {
     const r1 = expectStatus(await call('POST', '/auth/refresh', { body: { refreshToken: s.refreshToken } }), 200);
     assert.strictEqual(r1.sessionId, s.sessionId);
     expectStatus(await call('GET', '/auth/me', { token: r1.accessToken }), 200);
-    // The first refresh token was already used: treat as stolen
+    // The first refresh token was already used and its reuse interval is over: treat as stolen
+    await new Promise(r => setTimeout(r, 1200));
     expectStatus(await call('POST', '/auth/refresh', { body: { refreshToken: s.refreshToken } }), 401);
     expectStatus(await call('GET', '/auth/me', { token: r1.accessToken }), 401);
     expectStatus(await call('POST', '/auth/refresh', { body: { refreshToken: r1.refreshToken } }), 401);
@@ -109,10 +113,15 @@ async function main() {
     assert.ok(events.some(e => e.sessionId === s.sessionId));
   });
 
-  await test('concurrent refreshes with the same token: exactly one wins', async () => {
+  await test('two tabs refreshing with the same token keep the session (reuse interval)', async () => {
     const s = await login(alice.username);
     const results = await Promise.all([1, 2, 3].map(() => call('POST', '/auth/refresh', { body: { refreshToken: s.refreshToken } })));
-    assert.strictEqual(results.filter(r => r.status === 200).length <= 1, true);
+    assert.deepStrictEqual(results.map(r => r.status), [200, 200, 200]);
+    for (const r of results) expectStatus(await call('GET', '/auth/me', { token: r.body.accessToken }), 200);
+    // After the interval the replaced token counts as stolen and the session ends
+    await new Promise(r => setTimeout(r, 1200));
+    expectStatus(await call('POST', '/auth/refresh', { body: { refreshToken: s.refreshToken } }), 401);
+    expectStatus(await call('GET', '/auth/me', { token: results[0].body.accessToken }), 401);
   });
 
   await test('an admin revokes a session and all sessions of a user; open streams are closed', async () => {

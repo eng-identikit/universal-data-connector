@@ -8,7 +8,8 @@ const logger = require('../../utils/logger');
  *
  * The refresh token is single use: each refresh rotates its jti. Presenting
  * an already used refresh token means it was copied, and the whole session is
- * revoked ('reuse').
+ * revoked ('reuse'). The token replaced last is still accepted for
+ * REUSE_INTERVAL_MS, so two browser tabs refreshing at once keep the session.
  *
  * Session: { id, userId, ip, userAgent, createdAt, lastSeenAt, expiresAt }
  *
@@ -19,6 +20,7 @@ const logger = require('../../utils/logger');
 const newId = () => crypto.randomBytes(16).toString('base64url');
 // lastSeenAt is written at most once per interval per session
 const TOUCH_INTERVAL_MS = 60 * 1000;
+const REUSE_INTERVAL_MS = Number(process.env.BROKER_REFRESH_REUSE_INTERVAL_MS) || 30 * 1000;
 
 class BaseSessionStore {
   constructor() {
@@ -65,9 +67,13 @@ class PgSessionStore extends BaseSessionStore {
   async rotate(sid, jti, expiresAt) {
     const next = newId();
     const { rowCount } = await this.pool.query(
-      `UPDATE auth_sessions SET refresh_jti = $3, expires_at = $4, last_seen_at = now()
-        WHERE id = $1 AND refresh_jti = $2 AND expires_at > now()`,
-      [sid, jti, next, expiresAt]
+      `UPDATE auth_sessions
+          SET prev_jti = CASE WHEN refresh_jti = $2 THEN refresh_jti ELSE prev_jti END,
+              rotated_at = CASE WHEN refresh_jti = $2 THEN now() ELSE rotated_at END,
+              refresh_jti = $3, expires_at = $4, last_seen_at = now()
+        WHERE id = $1 AND expires_at > now()
+          AND (refresh_jti = $2 OR (prev_jti = $2 AND rotated_at > now() - make_interval(secs => $5)))`,
+      [sid, jti, next, expiresAt, REUSE_INTERVAL_MS / 1000]
     );
     if (rowCount) return { jti: next };
     return (await this.get(sid)) ? { reuse: true } : null;
@@ -109,11 +115,18 @@ function fromRow(r) {
   };
 }
 
-// Atomic refresh rotation: 1 rotated, 0 reused (wrong jti), -1 no session
+// Atomic refresh rotation: 1 rotated, 0 reused (wrong jti), -1 no session.
+// ARGV: presented jti, new jti, expiresAt, now (ISO), ttl ms, now ms, reuse interval ms
 const ROTATE_LUA = `
 local cur = redis.call('HGET', KEYS[1], 'jti')
 if not cur then return -1 end
-if cur ~= ARGV[1] then return 0 end
+if cur == ARGV[1] then
+  redis.call('HSET', KEYS[1], 'prevJti', cur, 'rotatedAt', ARGV[6])
+else
+  local prev = redis.call('HGET', KEYS[1], 'prevJti')
+  local at = tonumber(redis.call('HGET', KEYS[1], 'rotatedAt') or '0')
+  if prev ~= ARGV[1] or tonumber(ARGV[6]) - at > tonumber(ARGV[7]) then return 0 end
+end
 redis.call('HSET', KEYS[1], 'jti', ARGV[2], 'expiresAt', ARGV[3], 'lastSeenAt', ARGV[4])
 redis.call('PEXPIRE', KEYS[1], ARGV[5])
 return 1`;
@@ -162,7 +175,8 @@ class RedisSessionStore extends BaseSessionStore {
   async rotate(sid, jti, expiresAt) {
     const next = newId();
     const ttl = Math.max(1000, expiresAt.getTime() - Date.now());
-    const r = await this.redis.rotateSession(this._key(sid), jti, next, expiresAt.toISOString(), new Date().toISOString(), ttl);
+    const now = Date.now();
+    const r = await this.redis.rotateSession(this._key(sid), jti, next, expiresAt.toISOString(), new Date(now).toISOString(), ttl, now, REUSE_INTERVAL_MS);
     if (r === 1) return { jti: next };
     return r === 0 ? { reuse: true } : null;
   }

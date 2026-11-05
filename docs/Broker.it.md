@@ -306,7 +306,7 @@ Le subscription accettano `select.bbox`.
 
 **Sessioni e token**
 - Ogni login apre una sessione; l'access token da 15 minuti e il refresh token da 7 giorni ne portano l'id. Un token è accettato solo finché la sua sessione esiste: un logout o una revoca valgono dalla richiesta successiva su tutte le istanze, e gli stream aperti di quella sessione vengono chiusi con `4001`.
-- I refresh token si usano una volta sola: ogni refresh ne consegna uno nuovo. Ripresentare un refresh token già usato significa che è stato copiato, e l'intera sessione viene revocata (`refresh_reuse` nello storico accessi).
+- I refresh token si usano una volta sola: ogni refresh ne consegna uno nuovo. Ripresentare un refresh token già usato significa che è stato copiato, e l'intera sessione viene revocata (`refresh_reuse` nello storico accessi). L'ultimo token sostituito resta valido per 30 secondi (`BROKER_REFRESH_REUSE_INTERVAL_MS`), così due schede del browser che rinnovano nello stesso momento non chiudono la sessione.
 - Cambiare la password, disabilitare o eliminare un utente chiude tutte le sue sessioni.
 - Le sessioni stanno in Redis (`BROKER_REDIS_URL`) oppure, senza, in PostgreSQL. La pagina Amministrazione le elenca (utente, indirizzo, client, inizio, ultima attività) e ne revoca una o tutte quelle di un utente.
 - Lo storico accessi (`auth_events`) registra login, tentativi falliti e bloccati, logout, refresh token riusati e revoche, con indirizzo e client. Viene conservato per `BROKER_AUTH_LOG_RETENTION_DAYS` (90) giorni.

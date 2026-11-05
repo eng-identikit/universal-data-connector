@@ -97,8 +97,9 @@ class ConfigSync {
   async pull(key) {
     const { rows } = await this.pool.query('SELECT value FROM system_config WHERE key = $1', [key]);
     if (!rows.length) return;
-    if (sameJson(rows[0].value, await this._read(key))) return;
-    await this._write(key, rows[0].value);
+    // With a config directory shared by the instances (Compose bind mount, a shared
+    // volume) the file is already up to date: reload anyway, the message means it changed
+    if (!sameJson(rows[0].value, await this._read(key))) await this._write(key, rows[0].value);
     await this._reload(key);
     logger.info(`Config sync: ${key} updated from another instance`);
   }
