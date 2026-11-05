@@ -35,6 +35,7 @@ const entityRoutes = require('./api/entityRoutes');
 const subscriptionRoutes = require('./api/subscriptionRoutes');
 const dataRoutes = require('./api/dataRoutes');
 const transformerRoutes = require('./api/transformerRoutes');
+const mcpRoutes = require('./api/mcpRoutes');
 
 const RETRY_INTERVAL_MS = 5000;
 
@@ -315,6 +316,7 @@ class Broker {
     router.use(subscriptionRoutes(deps));
     router.use(dataRoutes(deps));
     router.use(transformerRoutes(deps));
+    router.use(mcpRoutes(deps));
     router.get('/cluster', requireSuperadmin, (req, res, next) => this.clusterStatus().then(s => res.json(s)).catch(next));
     router.use(adminRoutes(deps));
 

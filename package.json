@@ -16,7 +16,7 @@
     "test:storage": "node tests/test-storage.js",
     "test:dynamic-config": "node tests/test-dynamic-config.js",
     "test:drivers": "node tests/test-drivers.js",
-    "test:broker": "node tests/test-broker-model.js && node tests/test-broker-expression.js && node tests/test-broker-pipeline.js && node tests/test-broker-api.js && node tests/test-broker-sessions.js && node tests/test-broker-subscriptions.js && node tests/test-broker-transformers.js && node tests/test-broker-data.js && node tests/test-broker-geo.js && node tests/test-broker-cluster.js",
+    "test:broker": "node tests/test-broker-model.js && node tests/test-broker-expression.js && node tests/test-broker-pipeline.js && node tests/test-broker-api.js && node tests/test-broker-sessions.js && node tests/test-broker-subscriptions.js && node tests/test-broker-transformers.js && node tests/test-broker-mcp.js && node tests/test-broker-data.js && node tests/test-broker-geo.js && node tests/test-broker-cluster.js",
     "build": "npm install"
   },
   "keywords": [
@@ -41,6 +41,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "ads-client": "^2.2.0",
     "axios": "^1.13.2",
     "bacstack": "^0.0.1-beta.14",
@@ -68,9 +70,11 @@
     "serialport": "^12.0.0",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
-    "ws": "^8.14.2"
+    "ws": "^8.14.2",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/node": "^20.10.4",
     "jest": "^29.7.0",
     "nodemon": "^3.0.2"

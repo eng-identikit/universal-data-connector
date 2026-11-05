@@ -130,6 +130,7 @@ All routes are under `/api/v1`.
 | Commands | `POST /entities/:id/attrs/:attr/command {value}` (`?wait=ms`), `GET /commands?entityId&status`, `GET /commands/:id` |
 | Subscriptions | `GET`/`POST /subscriptions`, `GET`/`PATCH`/`DELETE /subscriptions/:id`, `POST /:id/pause`, `POST /:id/resume`, `POST /:id/test`, `DELETE /:id/stats`, `GET /:id/dlq`, `POST /:id/dlq/replay`, `DELETE /:id/dlq`, `POST /subscriptions/preview`, `POST /expressions/validate` |
 | Transformers | `GET /transformers`, `GET`/`PUT`/`DELETE /transformers/:id`, `POST /transformers/preview` |
+| MCP (LLM access) | `/mcp` (Streamable HTTP, read-only), `GET /mcp-info` |
 | Administration | `/users` (superadmin), `/tenants`, `/tenants/:id/members`, `/apikeys` (users only, not API keys), `GET /cluster` (superadmin) |
 | Sessions and access log (superadmin) | `GET /sessions?userId`, `DELETE /sessions/:id`, `DELETE /users/:id/sessions`, `GET /auth-events?userId&kind&from&to&limit&offset` |
 | System | `/system/*`: connectors, mapping, storage configuration, engine status. Any authenticated caller can read; only a superadmin can change anything. Replaces the former `/api`. |
@@ -278,6 +279,32 @@ ws://host/api/v1/stream?access_token=<jwt>&tenant=<id>      (or api_key=<key>)
 - `BROKER_HISTORY_RETENTION` (for example `90 days`) adds a TimescaleDB retention policy; `BROKER_HISTORY=off` disables history.
 - History is kept after an entity is deleted (audit) and removed together with its tenant.
 
+## LLM access (MCP)
+
+The broker is also an MCP server ([Model Context Protocol](https://modelcontextprotocol.io)): an AI assistant such as Claude can read the data of a tenant and answer questions on it. Access is **read-only**.
+
+- **Endpoint**: `/api/v1/mcp`, Streamable HTTP, stateless (any instance of a cluster answers).
+- **Authentication**: an API key, sent as `Authorization: Bearer udc_...` or `X-API-Key`. The key decides the tenant and, with `allowedTypes`, which entity types the assistant sees. A user token also works, with `X-Tenant`. A viewer key is enough.
+- **UI**: *Administration → LLM access (MCP)* creates a key for the assistant and shows the configuration for Claude Code, Claude Desktop and other stdio clients (through `mcp-remote`), VS Code and any Streamable HTTP client.
+- `BROKER_MCP=false` turns the endpoint off.
+
+| Tool | What it returns |
+|---|---|
+| `udc_describe_data_model` | Entity types with their count and attributes (kind, unit, example, relationship targets) |
+| `udc_search_entities` | Entities by type, id pattern, relationship (`related_to`, depth, direction), distance from a point or bounding box; paginated |
+| `udc_get_entity` | One entity with every attribute and which attributes have history |
+| `udc_get_related_entities` | Entities and links around an entity |
+| `udc_get_attribute_history` | Downsampled history (avg/min/max/last per bucket) with overall statistics; `from` accepts dates or durations such as `24h`, `7d` |
+| `udc_get_raw_samples` | Individual readings of one attribute |
+
+Resources: `udc://data-model` and `udc://entities/{id}`. Every tool answers in Markdown (default) or JSON (`response_format: "json"`, with `structuredContent`); answers are kept under 25,000 characters (`BROKER_MCP_CHARACTER_LIMIT`) by returning fewer items, with `next_offset` to continue.
+
+Example with Claude Code:
+
+```bash
+claude mcp add --transport http udc https://udc.example.com/api/v1/mcp --header "Authorization: Bearer udc_..."
+```
+
 ## Geo queries
 
 These need PostGIS, which the `timescale/timescaledb-ha` image includes. Without PostGIS, geo parameters answer `501`.
@@ -366,6 +393,7 @@ With `BROKER_CLUSTER=true` (and NATS), several instances share the work through 
 | `BROKER_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Proxies whose `X-Forwarded-For` is trusted |
 | `BROKER_COMMAND_TIMEOUT_MS` | 10000 | Command timeout |
 | `BROKER_TRANSFORMERS_FILE` / `BROKER_TRANSFORM_TIMEOUT_MS` | `config/transformers.json` / 500 | Transformer library and evaluation time limit |
+| `BROKER_MCP` / `BROKER_MCP_CHARACTER_LIMIT` | `true` / 25000 | MCP endpoint for LLMs and the size cap of its answers |
 | `UDC_RAW_STORAGE` | — | `memory` ignores `storage.json`, the raw connector data buffer |
 | `PORT`, `BODY_LIMIT`, `LOG_LEVEL` | 3000, `5mb`, `info` | |
 

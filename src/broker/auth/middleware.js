@@ -62,14 +62,20 @@ async function resolveTenant({ tenants }, auth, requested, minRole) {
   return { tenant, role, allowedTypes: auth.allowedTypes || null };
 }
 
-/** Express middleware: `Authorization: Bearer <jwt>` or `X-API-Key`, sets req.auth. */
+/**
+ * Express middleware: `Authorization: Bearer <jwt>`, `X-API-Key`, or an API key
+ * as bearer token (`Bearer udc_...`, for clients that only send bearer tokens,
+ * e.g. MCP clients). Sets req.auth.
+ */
 function authenticate(services) {
   return async (req, res, next) => {
     try {
       const header = req.get('authorization') || '';
+      const bearer = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+      const bearerIsKey = !!bearer && bearer.startsWith('udc_');
       req.auth = await resolveCaller(services, {
-        token: header.startsWith('Bearer ') ? header.slice(7) : null,
-        apiKey: req.get('x-api-key')
+        token: bearerIsKey ? null : bearer,
+        apiKey: req.get('x-api-key') || (bearerIsKey ? bearer : null)
       });
       next();
     } catch (error) {

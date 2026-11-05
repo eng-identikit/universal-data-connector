@@ -11,7 +11,8 @@ The Universal Data Connector project has been completely restructured to provide
 UDC is also a standalone **context broker**:
 - devices read by the connectors become **entities** (current state, relationships, location, attribute history);
 - producers can write entities through the API;
-- **subscriptions** notify external systems over HTTP, MQTT, NATS or WebSocket, with filters, deadband, throttling and a dead-letter queue;
+- **subscriptions** notify external systems over HTTP, MQTT, NATS or WebSocket, with filters, deadband, throttling, a dead-letter queue and a JSONata **transformer** that gives the message the format the receiver expects;
+- an **MCP** endpoint lets an AI assistant (Claude or other MCP clients) read entities, relationships and history, read-only;
 - several instances can run as a **cluster**.
 
 ```bash

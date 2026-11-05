@@ -130,6 +130,7 @@ Tutte le route sono sotto `/api/v1`.
 | Comandi | `POST /entities/:id/attrs/:attr/command {value}` (`?wait=ms`), `GET /commands?entityId&status`, `GET /commands/:id` |
 | Subscription | `GET`/`POST /subscriptions`, `GET`/`PATCH`/`DELETE /subscriptions/:id`, `POST /:id/pause`, `POST /:id/resume`, `POST /:id/test`, `DELETE /:id/stats`, `GET /:id/dlq`, `POST /:id/dlq/replay`, `DELETE /:id/dlq`, `POST /subscriptions/preview`, `POST /expressions/validate` |
 | Transformer | `GET /transformers`, `GET`/`PUT`/`DELETE /transformers/:id`, `POST /transformers/preview` |
+| MCP (accesso LLM) | `/mcp` (Streamable HTTP, sola lettura), `GET /mcp-info` |
 | Amministrazione | `/users` (superadmin), `/tenants`, `/tenants/:id/members`, `/apikeys` (solo utenti, non API key), `GET /cluster` (superadmin) |
 | Sessioni e storico accessi (superadmin) | `GET /sessions?userId`, `DELETE /sessions/:id`, `DELETE /users/:id/sessions`, `GET /auth-events?userId&kind&from&to&limit&offset` |
 | Sistema | `/system/*`: connettori, mapping, configurazione storage, stato del motore. Lettura per tutti gli autenticati, modifiche solo per il superadmin. Ha sostituito la vecchia `/api`. |
@@ -278,6 +279,32 @@ ws://host/api/v1/stream?access_token=<jwt>&tenant=<id>      (oppure api_key=<key
 - `BROKER_HISTORY_RETENTION` (per esempio `90 days`) applica una retention policy TimescaleDB, `BROKER_HISTORY=off` disattiva lo storico.
 - Lo storico resta anche dopo la cancellazione dell'entità (audit) e viene rimosso insieme al tenant.
 
+## Accesso per LLM (MCP)
+
+Il broker è anche un server MCP ([Model Context Protocol](https://modelcontextprotocol.io)): un assistente AI come Claude può leggere i dati di un tenant e rispondere a domande su di essi. L'accesso è in **sola lettura**.
+
+- **Endpoint**: `/api/v1/mcp`, Streamable HTTP, senza stato (risponde qualsiasi istanza del cluster).
+- **Autenticazione**: una API key, inviata come `Authorization: Bearer udc_...` o `X-API-Key`. La chiave decide il tenant e, con `allowedTypes`, quali tipi di entità vede l'assistente. Funziona anche un token utente, con `X-Tenant`. Basta una chiave con ruolo viewer.
+- **UI**: *Amministrazione → Accesso LLM (MCP)* crea una chiave per l'assistente e mostra la configurazione per Claude Code, Claude Desktop e gli altri client stdio (tramite `mcp-remote`), VS Code e qualsiasi client Streamable HTTP.
+- `BROKER_MCP=false` disattiva l'endpoint.
+
+| Tool | Cosa restituisce |
+|---|---|
+| `udc_describe_data_model` | Tipi di entità con il loro numero e gli attributi (tipo, unità, esempio, target delle relazioni) |
+| `udc_search_entities` | Entità per tipo, pattern dell'id, relazione (`related_to`, profondità, direzione), distanza da un punto o area; paginato |
+| `udc_get_entity` | Un'entità con tutti gli attributi e quali attributi hanno storico |
+| `udc_get_related_entities` | Entità e collegamenti attorno a un'entità |
+| `udc_get_attribute_history` | Storico aggregato (media/min/max/ultimo per intervallo) con statistiche complessive; `from` accetta date o durate come `24h`, `7d` |
+| `udc_get_raw_samples` | Singole letture di un attributo |
+
+Risorse: `udc://data-model` e `udc://entities/{id}`. Ogni tool risponde in Markdown (predefinito) o JSON (`response_format: "json"`, con `structuredContent`); le risposte restano sotto i 25.000 caratteri (`BROKER_MCP_CHARACTER_LIMIT`) restituendo meno elementi, con `next_offset` per proseguire.
+
+Esempio con Claude Code:
+
+```bash
+claude mcp add --transport http udc https://udc.example.com/api/v1/mcp --header "Authorization: Bearer udc_..."
+```
+
 ## Query geografiche
 
 Richiedono PostGIS, che è incluso nell'immagine `timescale/timescaledb-ha`. Senza PostGIS i parametri geo rispondono `501`.
@@ -366,6 +393,7 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 | `BROKER_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Proxy di cui fidarsi per `X-Forwarded-For` |
 | `BROKER_COMMAND_TIMEOUT_MS` | 10000 | Timeout dei comandi |
 | `BROKER_TRANSFORMERS_FILE` / `BROKER_TRANSFORM_TIMEOUT_MS` | `config/transformers.json` / 500 | Libreria dei transformer e tempo massimo di valutazione |
+| `BROKER_MCP` / `BROKER_MCP_CHARACTER_LIMIT` | `true` / 25000 | Endpoint MCP per gli LLM e dimensione massima delle sue risposte |
 | `UDC_RAW_STORAGE` | — | `memory` ignora `storage.json`, cioè il buffer dei dati grezzi dei connettori |
 | `PORT`, `BODY_LIMIT`, `LOG_LEVEL` | 3000, `5mb`, `info` | |
 
