@@ -1,7 +1,7 @@
 Universal Data Connector {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}".
 
 Backend replicas: {{ .Values.backend.replicas }} (cluster mode: connectors and subscriptions are split through leases)
-Database: {{ include "udc.dbHost" . }}   NATS: {{ if .Values.nats.enabled }}{{ include "udc.natsUrl" . }}{{ else }}disabled (in-memory queues){{ end }}   MQTT: {{ include "udc.mqttUrl" . | default "none" }}
+Database: {{ include "udc.dbHost" . }}   NATS: {{ if .Values.nats.enabled }}{{ include "udc.natsUrl" . }}{{ else }}disabled (in-memory queues){{ end }}   MQTT: {{ include "udc.mqttUrl" . | default "none" }}   Sessions: {{ if .Values.redis.enabled }}Redis{{ else }}PostgreSQL{{ end }}
 
 Admin login: {{ .Values.auth.adminUser }}
 {{- if not .Values.auth.existingSecret }}

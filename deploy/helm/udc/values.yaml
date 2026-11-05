@@ -89,3 +89,12 @@ mqtt:
   bundled: false
   url: ""
   image: eclipse-mosquitto:2
+
+redis:
+  # Login sessions behind the JWTs and shared login attempt limits. Without it
+  # sessions are kept in PostgreSQL (works, one more query per request).
+  enabled: true
+  bundled: true
+  # external: redis://:password@redis.example:6379
+  url: ""
+  image: redis:7-alpine

@@ -6,19 +6,37 @@ const MAX_BATCH = 500;
 // time cluster-wide, so concurrent batches never wait on each other's row locks
 const PARTITIONS = parseInt(process.env.BROKER_INGEST_PARTITIONS || '16', 10);
 
+// Buffered updates kept per tenant while the queue is unreachable; beyond this they are dropped
+const MAX_BUFFERED = 100000;
+
+const validJob = (job) => job && typeof job.tenant === 'string' && Array.isArray(job.updates)
+  && (job.allowedTypes == null || Array.isArray(job.allowedTypes));
+
 /**
- * Jobs fetched together from one partition become one batch per (tenant,
- * allowedTypes), keeping their order (later updates of an entity win).
+ * Jobs fetched together from one partition are applied in fewer batches:
+ * consecutive jobs with the same (tenant, allowedTypes) are concatenated, so
+ * the order is kept (later updates of an entity win). Malformed jobs (e.g.
+ * published on an ingest subject by something else) are skipped.
  */
 function mergeJobs(jobs) {
-  const groups = new Map();
+  const batches = [];
+  let last = null;
+  let lastKey = null;
   for (const job of jobs) {
+    if (!validJob(job)) {
+      logger.warn('Ingest: malformed job skipped');
+      continue;
+    }
     const key = `${job.tenant}|${job.allowedTypes ? job.allowedTypes.join(',') : ''}`;
-    const group = groups.get(key);
-    if (group) group.updates.push(...job.updates);
-    else groups.set(key, { tenant: job.tenant, allowedTypes: job.allowedTypes, updates: [...job.updates] });
+    if (last && key === lastKey) {
+      last.updates.push(...job.updates);
+    } else {
+      last = { tenant: job.tenant, allowedTypes: job.allowedTypes, updates: [...job.updates] };
+      lastKey = key;
+      batches.push(last);
+    }
   }
-  return [...groups.values()];
+  return batches;
 }
 
 /** Stable partition of an entity id (FNV-1a). */
@@ -60,10 +78,22 @@ class IngestService {
 
   push(tenant, update) {
     this.stats.received++;
+    this._buffer(tenant, update, false);
+  }
+
+  /** older: the update predates what is buffered (re-buffered after a failed publish). */
+  _buffer(tenant, update, older) {
     let entities = this.buffer.get(tenant);
     if (!entities) this.buffer.set(tenant, entities = new Map());
-    const prev = entities.get(update.id);
-    entities.set(update.id, prev ? { ...prev, ...update, attrs: { ...prev.attrs, ...update.attrs } } : update);
+    const current = entities.get(update.id);
+    if (!current) {
+      if (older && entities.size >= MAX_BUFFERED) return false;
+      entities.set(update.id, update);
+    } else {
+      const [base, top] = older ? [update, current] : [current, update];
+      entities.set(update.id, { ...base, ...top, attrs: { ...base.attrs, ...top.attrs } });
+    }
+    return true;
   }
 
   async enqueue(tenant, updates, { allowedTypes = null } = {}) {
@@ -77,11 +107,18 @@ class IngestService {
     this.buffer = new Map();
     for (const [tenant, entities] of buffer) {
       const updates = [...entities.values()];
-      await this._publishAll(tenant, updates, null)
-        .catch(error => logger.error(`Ingest publish failed (${updates.length} updates dropped): ${error.message}`));
+      try {
+        await this._publishAll(tenant, updates, null);
+      } catch (error) {
+        // Queue unreachable (e.g. NATS reconnecting): keep what was not published for the next flush
+        const unsent = error.unsent || updates;
+        const dropped = unsent.filter(u => !this._buffer(tenant, u, true)).length;
+        logger.error(`Ingest publish failed, ${unsent.length - dropped} updates kept for retry${dropped ? `, ${dropped} dropped (buffer full)` : ''}: ${error.message}`);
+      }
     }
   }
 
+  /** Rejects with error.unsent = the updates that were not published. */
   async _publishAll(tenant, updates, allowedTypes) {
     const byPartition = new Map();
     for (const u of updates) {
@@ -90,13 +127,25 @@ class IngestService {
       byPartition.get(p).push(u);
     }
     const subject = `udc.ingest.${tenant.replace(/[.\s*>]/g, '_')}`;
+    const unsent = [];
+    let failure = null;
     await Promise.all([...byPartition].map(async ([partition, items]) => {
       for (let i = 0; i < items.length; i += MAX_BATCH) {
         const job = { tenant, updates: items.slice(i, i + MAX_BATCH), allowedTypes };
-        await this.queue.publish(subject, job, { partition });
-        this.stats.published += job.updates.length;
+        try {
+          await this.queue.publish(subject, job, { partition });
+          this.stats.published += job.updates.length;
+        } catch (error) {
+          failure = failure || error;
+          unsent.push(...items.slice(i));
+          return;
+        }
       }
     }));
+    if (failure) {
+      failure.unsent = unsent;
+      throw failure;
+    }
   }
 
   async _apply(job) {
@@ -132,3 +181,4 @@ class IngestService {
 
 module.exports = IngestService;
 module.exports.PARTITIONS = PARTITIONS;
+module.exports.mergeJobs = mergeJobs;

@@ -17,9 +17,16 @@
  * arithmetic on non-numbers yields null.
  */
 
+const { safeRegExp, UnsafeRegexError } = require('./safeRegex');
+
 const MAX_LENGTH = 2000;
 const MAX_DEPTH = 40;
 const MAX_REGEX_LENGTH = 200;
+// Longest string a 'matches' is applied to (longer strings never match)
+const MAX_MATCH_INPUT = 1000;
+
+// 'matches' runs in the change hot path: regexes are compiled by safeRegExp
+// (linear-time engine, or rejected when they could backtrack exponentially).
 
 class ExpressionError extends Error {
   constructor(message, position) {
@@ -64,7 +71,7 @@ function tokenize(src) {
       const m = /^@?[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
       if (!m) throw new ExpressionError(`Unexpected '${c}'`, i);
       const word = m[0];
-      if (WORD_OPS[word]) tokens.push({ t: 'op', v: WORD_OPS[word], pos: i });
+      if (Object.hasOwn(WORD_OPS, word)) tokens.push({ t: 'op', v: WORD_OPS[word], pos: i });
       else if (KEYWORDS.has(word)) tokens.push({ t: 'kw', v: word, pos: i });
       else tokens.push({ t: 'id', v: word, pos: i });
       i += word.length;
@@ -141,7 +148,7 @@ function parse(src) {
       if (t.v === 'matches') {
         if (right.k !== 'lit' || typeof right.v !== 'string') throw new ExpressionError("'matches' needs a string literal regex", t.pos);
         if (right.v.length > MAX_REGEX_LENGTH) throw new ExpressionError('Regex too long', t.pos);
-        try { right.re = new RegExp(right.v); } catch (e) { throw new ExpressionError(`Invalid regex: ${e.message}`, t.pos); }
+        right.re = compileRegex(right.v, t.pos);
       }
       return { k: 'bin', op: t.v, left, right };
     }
@@ -191,7 +198,7 @@ function parse(src) {
   }
 
   function parseCall(t) {
-    const spec = FUNCTIONS[t.v];
+    const spec = Object.hasOwn(FUNCTIONS, t.v) ? FUNCTIONS[t.v] : null;
     if (!spec) throw new ExpressionError(`Unknown function '${t.v}'`, t.pos);
     next();
     const args = [];
@@ -245,12 +252,15 @@ function parse(src) {
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const sameType = (a, b) => typeof a === typeof b && a !== null && b !== null;
 
+// Own properties only: names like 'constructor' must not reach Object.prototype
+const own = (obj, key) => (obj && typeof obj === 'object' && Object.hasOwn(obj, key) ? obj[key] : undefined);
+
 function attrValue(entity, name, path) {
-  const attr = entity?.attrs?.[name];
+  const attr = own(entity?.attrs, name);
   if (!attr) return null;
   if (!path.length) return attr.type === 'relationship' ? attr.target : (attr.value ?? null);
-  if (path[0] === 'meta') return path.length === 2 ? (attr.meta?.[path[1]] ?? null) : (attr.meta ?? null);
-  return attr[path[0]] ?? null;
+  if (path[0] === 'meta') return path.length === 2 ? (own(attr.meta, path[1]) ?? null) : (attr.meta ?? null);
+  return own(attr, path[0]) ?? null;
 }
 
 function equals(a, b) {
@@ -279,6 +289,15 @@ function evaluate(node, ctx) {
   }
 }
 
+function compileRegex(source, pos) {
+  try {
+    return safeRegExp(source);
+  } catch (e) {
+    if (e instanceof UnsafeRegexError) throw new ExpressionError(e.message, pos);
+    throw new ExpressionError(`Invalid regex: ${e.message.replace(/^Invalid regular expression: /, '')}`, pos);
+  }
+}
+
 function truthy(v) {
   return v !== null && v !== undefined && v !== false && v !== 0 && v !== '';
 }
@@ -299,8 +318,7 @@ function binary(node, ctx) {
     case '<=': return sameType(a, b) && (isNum(a) || typeof a === 'string') && a <= b;
     case 'in': return Array.isArray(b) ? b.some(x => equals(x, a)) : (typeof b === 'string' && typeof a === 'string' && b.includes(a));
     case 'contains': return Array.isArray(a) ? a.some(x => equals(x, b)) : (typeof a === 'string' && typeof b === 'string' && a.includes(b));
-    // Length cap limits the cost of pathological user regexes
-    case 'matches': return typeof a === 'string' && a.length <= 10000 && node.right.re.test(a);
+    case 'matches': return typeof a === 'string' && a.length <= MAX_MATCH_INPUT && node.right.re.test(a);
     case '+':
       if (isNum(a) && isNum(b)) return a + b;
       if (typeof a === 'string' && typeof b === 'string') return a + b;
@@ -314,7 +332,7 @@ function binary(node, ctx) {
 }
 
 function callFn(node, ctx) {
-  if (node.fn === 'has') return !!ctx.entity?.attrs?.[node.args[0].v];
+  if (node.fn === 'has') return !!own(ctx.entity?.attrs, node.args[0].v);
   if (node.fn === 'now') return ctx.now;
   const args = node.args.map(a => evaluate(a, ctx));
   const [x, y] = args;

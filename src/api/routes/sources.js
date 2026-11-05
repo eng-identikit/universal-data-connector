@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../../utils/logger');
 const configManager = require('../../config/ConfigManager');
+const { forCaller } = require('../secrets');
+const { parseLimit } = require('../params');
 
 // Get all sources
 router.get('/', (req, res) => {
@@ -35,7 +37,7 @@ router.get('/', (req, res) => {
       timestamp: new Date().toISOString(),
       total: sources.length,
       enabled: sources.filter(s => s.enabled).length,
-      sources: sourcesWithStatus
+      sources: forCaller(req, sourcesWithStatus)
     });
 
   } catch (error) {
@@ -71,7 +73,7 @@ router.get('/:id', (req, res) => {
     res.json({
       timestamp: new Date().toISOString(),
       source: {
-        ...source,
+        ...forCaller(req, source),
         runtime: runtimeStatus
       }
     });
@@ -156,6 +158,13 @@ router.post('/:id/start', async (req, res) => {
       });
     }
 
+    if (!engine.canRun(sourceId)) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: `Source '${sourceId}' runs on another cluster instance: start it there`
+      });
+    }
+
     await engine.startConnector(sourceId);
 
     logger.info(`Source '${sourceId}' started via API`);
@@ -197,6 +206,13 @@ router.post('/:id/stop', async (req, res) => {
       return res.status(503).json({
         error: 'Service Unavailable',
         message: 'Data connector engine not available'
+      });
+    }
+
+    if (!engine.canRun(sourceId)) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: `Source '${sourceId}' runs on another cluster instance: stop it there`
       });
     }
 
@@ -244,6 +260,13 @@ router.post('/:id/restart', async (req, res) => {
       });
     }
 
+    if (!engine.canRun(sourceId)) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: `Source '${sourceId}' runs on another cluster instance: restart it there`
+      });
+    }
+
     await engine.restartConnector(sourceId);
 
     logger.info(`Source '${sourceId}' restarted via API`);
@@ -269,7 +292,7 @@ router.post('/:id/restart', async (req, res) => {
 router.get('/:id/data', async (req, res) => {
   try {
     const sourceId = req.params.id;
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = parseLimit(req.query.limit);
 
     const source = configManager.getSourceById(sourceId);
     if (!source) {
@@ -331,7 +354,7 @@ router.get('/:id/discovery', async (req, res) => {
       });
     }
 
-    const connectorInstance = engine.connectors.get(sourceId);
+    const connectorInstance = engine.connectors.get(sourceId)?.connector;
     if (!connectorInstance) {
       return res.status(404).json({
         error: 'Not Found',
@@ -361,7 +384,7 @@ router.get('/:id/discovery', async (req, res) => {
         topics: connectorInstance.discoveredTopics?.length || 0,
         registers: connectorInstance.discoveredRegisters?.length || 0
       },
-      message: 'Use POST /api/sources/:id/configure to select and activate discovered items'
+      message: 'Use POST /api/v1/system/sources/:id/configure to select and activate discovered items'
     });
 
   } catch (error) {
@@ -398,22 +421,21 @@ router.post('/:id/configure', async (req, res) => {
       });
     }
 
-    // Update source configuration
-    if (nodes) {
-      source.config.nodes = nodes;
-    }
-    if (topics) {
-      source.config.topics = topics;
-    }
-    if (registers) {
-      source.config.registers = registers;
+    for (const [name, value] of Object.entries({ nodes, topics, registers })) {
+      if (value !== undefined && !Array.isArray(value)) {
+        return res.status(400).json({ error: 'Bad Request', message: `${name} must be an array` });
+      }
     }
 
-    // Save updated configuration
-    await configManager.saveConfig();
+    // New configuration: saved (validated) first, the running source is untouched until then
+    const config = { ...source.config };
+    if (nodes) config.nodes = nodes;
+    if (topics) config.topics = topics;
+    if (registers) config.registers = registers;
+    await configManager.updateSource(sourceId, { config });
 
-    // Restart connector with new configuration
-    await engine.restartConnector(sourceId);
+    // Recreate the connector with the new configuration (a restart would reuse the old instance)
+    await req.app.get('serverInstance').reloadSourcesConfiguration();
 
     logger.info(`Source '${sourceId}' configured with discovered items and restarted`);
 
@@ -432,6 +454,9 @@ router.post('/:id/configure', async (req, res) => {
 
   } catch (error) {
     logger.error(`Error configuring source '${req.params.id}':`, error);
+    if (error.status === 400) {
+      return res.status(400).json({ error: 'Bad Request', message: error.message });
+    }
     res.status(500).json({
       error: 'Internal Server Error',
       message: `Failed to configure source: ${error.message}`

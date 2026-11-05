@@ -3,6 +3,20 @@ const router = express.Router();
 const logger = require('../../utils/logger');
 const configManager = require('../../config/ConfigManager');
 const storageConfigManager = require('../../config/StorageConfigManager');
+const { forCaller, restoreMasked } = require('../secrets');
+
+/** Applies the saved sources to the running engine (start/stop/update connectors). */
+async function applySources(req) {
+  const server = req.app.get('serverInstance');
+  if (server?.getEngine()) await server.reloadSourcesConfiguration();
+}
+
+/** Stored storage configuration of the given type (active or alternative), to restore masked secrets. */
+async function storedStorageConfig(type) {
+  const { storage, alternatives } = await storageConfigManager.getConfig();
+  if (storage?.type === type) return storage.config;
+  return alternatives?.[type]?.config;
+}
 
 // Get current configuration
 router.get('/', (req, res) => {
@@ -43,10 +57,10 @@ router.get('/', (req, res) => {
 router.get('/sources', (req, res) => {
   try {
     const sources = configManager.getSources();
-    
+
     res.json({
       timestamp: new Date().toISOString(),
-      sources
+      sources: forCaller(req, sources)
     });
 
   } catch (error) {
@@ -107,8 +121,9 @@ router.put('/sources/:id', async (req, res) => {
       });
     }
 
-    // Update configuration
+    // Update configuration and apply it to the running connectors
     const updatedSource = await configManager.updateSource(sourceId, updates);
+    await applySources(req);
     
     logger.info(`Source configuration updated via API: ${sourceId}`);
     
@@ -118,7 +133,7 @@ router.put('/sources/:id', async (req, res) => {
       sourceId,
       status: 'success',
       message: `Source '${sourceId}' configuration updated successfully`,
-      source: updatedSource
+      source: forCaller(req, updatedSource)
     });
 
   } catch (error) {
@@ -129,7 +144,7 @@ router.put('/sources/:id', async (req, res) => {
         error: 'Not Found',
         message: error.message
       });
-    } else if (error.message.includes('Invalid')) {
+    } else if (error.status === 400) {
       res.status(400).json({
         error: 'Bad Request',
         message: error.message
@@ -155,8 +170,9 @@ router.post('/sources', async (req, res) => {
       });
     }
 
-    // Add source configuration
+    // Add source configuration and start it if enabled
     const addedSource = await configManager.addSource(sourceConfig);
+    await applySources(req);
     
     logger.info(`New source configuration added via API: ${sourceConfig.id}`);
     
@@ -166,7 +182,7 @@ router.post('/sources', async (req, res) => {
       sourceId: sourceConfig.id,
       status: 'success',
       message: `Source '${sourceConfig.id}' configuration added successfully`,
-      source: addedSource
+      source: forCaller(req, addedSource)
     });
 
   } catch (error) {
@@ -177,7 +193,7 @@ router.post('/sources', async (req, res) => {
         error: 'Conflict',
         message: error.message
       });
-    } else if (error.message.includes('Invalid')) {
+    } else if (error.status === 400) {
       res.status(400).json({
         error: 'Bad Request',
         message: error.message
@@ -195,22 +211,10 @@ router.post('/sources', async (req, res) => {
 router.delete('/sources/:id', async (req, res) => {
   try {
     const sourceId = req.params.id;
-    
-    // Stop the connector if running
-    const connector = global.connector;
-    const engine = connector?.getEngine();
-    
-    if (engine) {
-      try {
-        await engine.stopConnector(sourceId);
-        logger.info(`Stopped connector '${sourceId}' before removing configuration`);
-      } catch (stopError) {
-        logger.warn(`Could not stop connector '${sourceId}' before removal:`, stopError);
-      }
-    }
-    
-    // Remove source configuration
+
+    // Remove source configuration, then stop and dispose its connector
     const removedSource = await configManager.removeSource(sourceId);
+    await applySources(req);
     
     logger.info(`Source configuration removed via API: ${sourceId}`);
     
@@ -220,7 +224,7 @@ router.delete('/sources/:id', async (req, res) => {
       sourceId,
       status: 'success',
       message: `Source '${sourceId}' configuration removed successfully`,
-      removedSource
+      removedSource: forCaller(req, removedSource)
     });
 
   } catch (error) {
@@ -252,39 +256,16 @@ router.post('/sources/validate', (req, res) => {
       });
     }
 
-    // Validate using Joi schema (this would use the same validation as ConfigManager)
-    const Joi = require('joi');
-    
-    const sourceSchema = Joi.object({
-      id: Joi.string().required(),
-      type: Joi.string().valid('opcua', 'mqtt', 'http').required(),
-      enabled: Joi.boolean().default(true),
-      name: Joi.string().optional(),
-      description: Joi.string().optional(),
-      config: Joi.object().required(),
-      retryConfig: Joi.object({
-        enabled: Joi.boolean().default(true),
-        maxRetries: Joi.number().integer().min(0).default(3),
-        retryDelay: Joi.number().integer().min(100).default(5000)
-      }).default(),
-      dataProcessing: Joi.object({
-        enabled: Joi.boolean().default(true),
-        transforms: Joi.array().items(Joi.string()).default([]),
-        validation: Joi.object().optional()
-      }).default()
-    });
-
-    const { error, value } = sourceSchema.validate(sourceConfig);
-    
-    if (error) {
+    // Same rules as ConfigManager (all connector types, tenant, entityIdPrefix, ...)
+    let value;
+    try {
+      [value] = configManager.validateSources([sourceConfig]);
+    } catch (error) {
+      if (error.status !== 400) throw error;
       return res.status(400).json({
         timestamp: new Date().toISOString(),
         valid: false,
-        errors: error.details.map(detail => ({
-          field: detail.path.join('.'),
-          message: detail.message,
-          value: detail.context?.value
-        }))
+        errors: [{ message: error.message }]
       });
     }
 
@@ -311,13 +292,21 @@ router.get('/storage', async (req, res) => {
   try {
     const storageConfig = await storageConfigManager.getConfig();
     const engine = req.app.get('serverInstance')?.getEngine();
+    const runtime = engine?.dataStore ? engine.dataStore.getStorageInfo() : null;
+    // UDC_RAW_STORAGE=memory makes the engine ignore the saved storage at startup
+    const overridden = process.env.UDC_RAW_STORAGE === 'memory' && runtime
+      && runtime.configuredType === 'memory' && storageConfig.storage?.type !== 'memory';
 
     res.json({
       timestamp: new Date().toISOString(),
       storage: {
-        current: storageConfig.storage,
-        alternatives: storageConfig.alternatives || {},
-        runtime: engine?.dataStore ? engine.dataStore.getStorageInfo() : null
+        current: forCaller(req, storageConfig.storage),
+        alternatives: forCaller(req, storageConfig.alternatives || {}),
+        runtime,
+        ...(overridden && {
+          overriddenBy: 'UDC_RAW_STORAGE=memory',
+          message: `The saved ${storageConfig.storage?.type} storage is not in use: UDC_RAW_STORAGE=memory keeps the raw data buffer in memory`
+        })
       }
     });
 
@@ -342,14 +331,16 @@ router.put('/storage', async (req, res) => {
       });
     }
 
-    const updatedConfig = await storageConfigManager.updateStorageConfig(storage);
+    const updatedConfig = await storageConfigManager.updateStorageConfig(
+      { ...storage, config: restoreMasked(storage.config, await storedStorageConfig(storage.type)) }
+    );
     
     logger.info('Storage configuration updated:', { newConfig: storage });
     
     res.json({
       timestamp: new Date().toISOString(),
-      message: 'Storage configuration saved; use POST /api/config/storage/reload to apply it',
-      storage: updatedConfig,
+      message: 'Storage configuration saved; use POST /api/v1/system/config/storage/reload to apply it',
+      storage: forCaller(req, updatedConfig),
       restartRequired: false
     });
 
@@ -401,8 +392,8 @@ router.post('/storage/test', async (req, res) => {
       });
     }
 
-    const testResult = await storageConfigManager.testConnection(type, config);
-    
+    const testResult = await storageConfigManager.testConnection(type, restoreMasked(config, await storedStorageConfig(type)));
+
     res.json({
       timestamp: new Date().toISOString(),
       test: {
@@ -519,8 +510,8 @@ router.post('/sources/reload', async (req, res) => {
 
   } catch (error) {
     logger.error('Error reloading sources configuration:', error);
-    
-    if (error.message.includes('validation')) {
+
+    if (error.status === 400 || error.message.includes('validation')) {
       return res.status(400).json({
         error: 'Validation Error',
         message: error.message
@@ -593,8 +584,8 @@ router.post('/sources/configure', async (req, res) => {
 
   } catch (error) {
     logger.error('Error updating sources configuration:', error);
-    
-    if (error.message.includes('validation')) {
+
+    if (error.status === 400 || error.message.includes('validation')) {
       return res.status(400).json({
         error: 'Validation Error',
         message: error.message
@@ -623,8 +614,10 @@ router.post('/storage/reload', async (req, res) => {
       });
     }
     
-    // Reload storage configuration
-    const result = await server.reloadStorageConfiguration(storage);
+    // Reload storage configuration (masked secrets keep their stored value)
+    const result = await server.reloadStorageConfiguration(
+      storage ? { ...storage, config: restoreMasked(storage.config, await storedStorageConfig(storage.type)) } : storage
+    );
     
     logger.info('Storage configuration reloaded via API', { 
       requestedBy: req.ip,
@@ -663,15 +656,17 @@ router.post('/storage/reload', async (req, res) => {
 // Update storage configuration with complete payload
 router.post('/storage/configure', async (req, res) => {
   try {
-    const { type, config } = req.body;
-    
-    if (!type || !config) {
+    const { type } = req.body;
+
+    if (!type || !req.body.config) {
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Storage type and config are required'
       });
     }
-    
+    // Masked secrets sent back by the UI keep their stored value
+    const config = restoreMasked(req.body.config, await storedStorageConfig(type));
+
     // Validate storage configuration
     const validationResult = await storageConfigManager.validateConfig(type, config);
     
@@ -717,7 +712,7 @@ router.post('/storage/configure', async (req, res) => {
       message: 'Storage configuration updated successfully',
       storage: {
         type: storageConfig.type,
-        config: storageConfig.config,
+        config: forCaller(req, storageConfig.config),
         connectionTest: {
           success: testResult.success,
           responseTime: testResult.responseTime
@@ -772,10 +767,7 @@ router.get('/engine/status', (req, res) => {
       engine: {
         isRunning: engineStatus.isRunning,
         stats: engineStatus.stats,
-        dataStore: {
-          type: engine.dataStore.getStorageType?.() || 'unknown',
-          status: 'connected' // Assuming connected if engine is running
-        }
+        dataStore: engine.dataStore ? engine.dataStore.getStorageInfo() : null
       },
       connectors: connectorStatus,
       configuration: {

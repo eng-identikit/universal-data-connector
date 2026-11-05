@@ -15,10 +15,13 @@ const PERIODIC_MAX_ENTITIES = 10000;
  *   2. trigger.on includes the operation
  *   3. selector: types, idPattern, ids, related (cached reachable set), bbox
  *   4. update only: one of trigger.attrs changed (all attrs if empty), with deadband
- *      relative to the last notified value
- *   5. filter true ('level') or turned true ('edge')
+ *      relative to the last notified value (the first value seen when nothing was
+ *      notified yet), so a slow drift fires once it exceeds the deadband
+ *   5. filter true ('level') or turned true ('edge'). Edge compares with the filter
+ *      result of the last change that passed the trigger, so changes held back by
+ *      the deadband cannot hide a crossing
  *   6. throttle: at most one notification per entity every throttleMs; the latest
- *      state is sent at the end of the window
+ *      state is sent at the end of the window, unless it no longer matches
  */
 class SubscriptionEngine {
   constructor({ subscriptions, entities, queue, bus }) {
@@ -30,6 +33,7 @@ class SubscriptionEngine {
     this.byTenant = new Map(); // tenant → Set<id>
     this.byType = new Map(); // tenant → { any: Set<id>, types: Map<type, Set<id>>, related: count }
     this.lastNotified = new LRUCache({ max: 200000 }); // `${sub}|${entity}` → { attr: value } for deadband
+    this.edgeState = new LRUCache({ max: 200000 }); // `${sub}|${entity}` → last filter result (edge mode)
     this.throttle = new Map(); // `${sub}|${entity}` → { last, pending, timer }
     this.periodicTimers = new Map();
     this.related = new Map(); // sub id → Set of entity ids
@@ -55,7 +59,15 @@ class SubscriptionEngine {
   async stop() {
     clearInterval(this.statsTimer);
     this.periodicTimers.forEach(clearInterval);
-    this.throttle.forEach(t => clearTimeout(t.timer));
+    // Trailing throttled notifications are sent now rather than lost
+    const sends = [];
+    for (const [key, t] of this.throttle) {
+      clearTimeout(t.timer);
+      const sub = this.subs.get(key.slice(0, key.indexOf('|')));
+      if (t.pending && sub && this._active(sub)) sends.push(this._send(sub, [t.pending.entity], t.pending.reason));
+    }
+    this.throttle.clear();
+    await Promise.all(sends);
     await this.flushStats();
   }
 
@@ -63,11 +75,21 @@ class SubscriptionEngine {
     return this.subs.get(id) || null;
   }
 
+  /**
+   * Subscription for delivering a queued notification: the in-memory copy, or
+   * the database row while the engine is still loading or reloading it.
+   * null means deleted.
+   */
+  async lookup(id) {
+    return this.subs.get(id) || this.store.loadOne(id);
+  }
+
   /** Reloads one subscription from the database (after CRUD on any instance). */
   async reload(id) {
-    this._unregister(id);
+    // Load first, then swap: the subscription never disappears while the database answers
     const sub = await this.store.loadOne(id);
     if (sub) await this._register(sub);
+    else this._unregister(id);
   }
 
   /** Re-evaluates ownership after the cluster partition assignment changed. */
@@ -77,6 +99,13 @@ class SubscriptionEngine {
 
   async _register(raw) {
     const sub = { ...raw };
+    let related = null;
+    if (sub.select.related) {
+      const { id, depth, direction } = sub.select.related;
+      related = new Set(await this.entities.reachableIds(sub.tenant, id, depth, direction));
+    }
+    // Replaces the previous version (reload) only now that the new one is complete
+    this._unregister(sub.id);
     try {
       sub.compiledFilter = sub.filter ? compile(sub.filter) : null;
     } catch (error) {
@@ -89,7 +118,7 @@ class SubscriptionEngine {
     if (!this.byTenant.has(sub.tenant)) this.byTenant.set(sub.tenant, new Set());
     this.byTenant.get(sub.tenant).add(sub.id);
     this._index(sub, true);
-    if (sub.select.related) await this._refreshRelated(sub);
+    if (related) this.related.set(sub.id, related);
     this._schedulePeriodic(sub);
   }
 
@@ -185,19 +214,50 @@ class SubscriptionEngine {
     const candidates = byType ? [...idx.any, ...byType] : idx.any;
     for (const id of candidates) {
       const sub = this.subs.get(id);
-      if (!sub || !this._active(sub) || !sub.trigger.on.includes(op)) continue;
+      if (!sub) continue;
+      const key = `${sub.id}|${target.id}`;
+      if (op === 'delete') this._forget(key);
+      if (!this._active(sub) || !sub.trigger.on.includes(op)) continue;
       if (!this._selects(sub, target)) continue;
 
-      if (op === 'update' && !this._triggered(sub, previous, entity)) continue;
+      const edge = sub.compiledFilter && sub.filterMode === 'edge';
+      // Edge state starts from the first state seen (no older state: prev.* is null)
+      if (edge && op === 'update' && !this.edgeState.has(key)) this.edgeState.set(key, sub.compiledFilter.test(previous, null));
+
+      if (op === 'update' && !this._triggered(sub, previous, entity)) {
+        // Not a notifying change, but a throttled notification must carry the latest state
+        const t = this.throttle.get(key);
+        if (t?.pending) t.pending.entity = entity;
+        continue;
+      }
 
       if (sub.compiledFilter) {
         const now = sub.compiledFilter.test(target, op === 'create' ? null : previous);
-        if (!now) continue;
-        if (sub.filterMode === 'edge' && op === 'update' && sub.compiledFilter.test(previous, null)) continue;
+        if (edge && op !== 'delete') {
+          const was = op === 'update' ? this.edgeState.get(key) : false;
+          this.edgeState.set(key, now);
+          if (!now || was) continue;
+        } else if (!now) {
+          // The latest state no longer matches: a pending trailing send would be stale
+          const t = this.throttle.get(key);
+          if (t) t.pending = null;
+          continue;
+        }
       }
 
       this._stat(sub.id, 'matched');
       this._emit(sub, target, op);
+    }
+  }
+
+  /** Drops the per-entity state of a subscription (entity deleted). */
+  _forget(key) {
+    this.lastNotified.delete(key);
+    this.edgeState.delete(key);
+    const t = this.throttle.get(key);
+    if (t) {
+      clearTimeout(t.timer);
+      this.throttle.delete(key);
     }
   }
 
@@ -214,14 +274,22 @@ class SubscriptionEngine {
   _triggered(sub, previous, entity) {
     const watched = sub.trigger.attrs?.length ? sub.trigger.attrs : unionKeys(previous.attrs, entity.attrs);
     const deadband = sub.trigger.deadband || {};
-    const last = this.lastNotified.get(`${sub.id}|${entity.id}`);
+    const key = `${sub.id}|${entity.id}`;
+    let last = this.lastNotified.get(key);
+    if (!last && Object.keys(deadband).length) {
+      // Nothing notified yet (new subscription, restart, handover): the reference is
+      // the first value seen, kept until a notification is sent
+      last = {};
+      for (const name of Object.keys(deadband)) last[name] = valueOf(own(previous.attrs, name));
+      this.lastNotified.set(key, last);
+    }
     return watched.some(name => {
-      const now = valueOf(entity.attrs[name]);
-      if (deadband[name] !== undefined && typeof now === 'number') {
-        const ref = last && name in last ? last[name] : valueOf(previous.attrs[name]);
+      const now = valueOf(own(entity.attrs, name));
+      if (Object.hasOwn(deadband, name) && typeof now === 'number') {
+        const ref = last && Object.hasOwn(last, name) ? last[name] : valueOf(own(previous.attrs, name));
         return typeof ref !== 'number' || Math.abs(now - ref) > deadband[name];
       }
-      return JSON.stringify(now) !== JSON.stringify(valueOf(previous.attrs[name]));
+      return JSON.stringify(now) !== JSON.stringify(valueOf(own(previous.attrs, name)));
     });
   }
 
@@ -243,7 +311,9 @@ class SubscriptionEngine {
         state.last = Date.now();
         const p = state.pending;
         state.pending = null;
-        if (p && this.subs.has(sub.id)) this._send(this.subs.get(sub.id), [p.entity], p.reason);
+        // Current version of the subscription: it may have been paused, expired or moved meanwhile
+        const current = this.subs.get(sub.id);
+        if (p && current && this._active(current)) this._send(current, [p.entity], p.reason);
       }, Math.max(0, sub.throttleMs - (now - state.last)));
     }
   }
@@ -365,6 +435,7 @@ class SubscriptionEngine {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 const valueOf = (attr) => (attr ? (attr.type === 'relationship' ? attr.target : attr.value) : undefined);
+const own = (obj, key) => (obj && Object.hasOwn(obj, key) ? obj[key] : undefined);
 
 function unionKeys(a = {}, b = {}) {
   return [...new Set([...Object.keys(a), ...Object.keys(b)])];

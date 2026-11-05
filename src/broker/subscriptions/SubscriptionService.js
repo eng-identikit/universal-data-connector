@@ -3,7 +3,8 @@ const { notFound } = require('../errors');
 
 const STATS_COLUMNS = `s.matched, s.delivered, s.failed_attempts, s.dead, s.last_notification_at,
   s.last_success_at, s.last_failure_at, s.last_error, s.last_latency_ms,
-  (SELECT count(*)::int FROM notification_dlq d WHERE d.subscription_id = sub.id) AS dlq_count`;
+  (SELECT count(*)::int FROM notification_dlq d WHERE d.subscription_id = sub.id) AS dlq_count,
+  (SELECT count(*)::int FROM notification_retries r WHERE r.subscription_id = sub.id) AS retrying_count`;
 
 /**
  * Subscription persistence. The engine keeps a compiled copy in memory and is
@@ -146,20 +147,64 @@ class SubscriptionService {
     }));
   }
 
-  /** Removes DLQ entries (all, or the given ids) and returns their notifications. */
-  async takeDead(tenant, subscriptionId, ids) {
+  /** DLQ entries (all, or the given ids) as { id, notification }, without removing them. */
+  async peekDead(tenant, subscriptionId, ids) {
     await this.get(tenant, subscriptionId);
-    const params = [tenant, subscriptionId];
-    let filter = '';
-    if (Array.isArray(ids) && ids.length) {
-      params.push(ids);
-      filter = 'AND id = ANY($3::uuid[])';
-    }
     const { rows } = await this.pool.query(
-      `DELETE FROM notification_dlq WHERE tenant = $1 AND subscription_id = $2 ${filter} RETURNING notification`,
-      params
+      `SELECT id, notification FROM notification_dlq
+        WHERE tenant = $1 AND subscription_id = $2 AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))
+        ORDER BY failed_at`,
+      [tenant, subscriptionId, Array.isArray(ids) && ids.length ? ids : null]
     );
-    return rows.map(r => r.notification);
+    return rows;
+  }
+
+  /** Removes DLQ entries (all, or the given ids); returns how many. */
+  async removeDead(tenant, subscriptionId, ids) {
+    await this.get(tenant, subscriptionId);
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM notification_dlq
+        WHERE tenant = $1 AND subscription_id = $2 AND ($3::uuid[] IS NULL OR id = ANY($3::uuid[]))`,
+      [tenant, subscriptionId, Array.isArray(ids) && ids.length ? ids : null]
+    );
+    return rowCount;
+  }
+
+  // ─── Delivery retries ───────────────────────────────────────────────────
+
+  /** Schedules (or reschedules) another attempt; the notification id identifies the row. */
+  async scheduleRetry({ tenant, subscriptionId, notification, attempts, error, dueAt }) {
+    await this.pool.query(
+      `INSERT INTO notification_retries (id, tenant, subscription_id, notification, attempts, last_error, due_at)
+       SELECT $1, $2, $3, $4, $5, $6, $7 WHERE EXISTS (SELECT 1 FROM subscriptions WHERE id = $3)
+       ON CONFLICT (id) DO UPDATE SET attempts = EXCLUDED.attempts, last_error = EXCLUDED.last_error, due_at = EXCLUDED.due_at`,
+      [notification.id, tenant, subscriptionId, notification, attempts, error || null, dueAt]
+    );
+  }
+
+  /**
+   * Claims due retries for this instance: at most perSubscription per subscription,
+   * so one failing endpoint cannot take every slot. A claimed row is pushed
+   * leaseMs into the future; if the instance dies it becomes due again.
+   */
+  async claimRetries(limit, perSubscription, leaseMs) {
+    const { rows } = await this.pool.query(
+      `UPDATE notification_retries r SET due_at = now() + ($3 || ' milliseconds')::interval
+        WHERE r.id IN (
+          SELECT id FROM notification_retries
+           WHERE id IN (SELECT id FROM (
+                   SELECT id, row_number() OVER (PARTITION BY subscription_id ORDER BY due_at) AS rn
+                     FROM notification_retries WHERE due_at <= now()) due
+                  WHERE rn <= $2)
+           ORDER BY due_at LIMIT $1 FOR UPDATE SKIP LOCKED)
+        RETURNING id, tenant, subscription_id, notification, attempts`,
+      [limit, perSubscription, String(leaseMs)]
+    );
+    return rows.map(r => ({ id: r.id, tenant: r.tenant, subscriptionId: r.subscription_id, notification: r.notification, attempts: r.attempts }));
+  }
+
+  async completeRetry(id) {
+    await this.pool.query('DELETE FROM notification_retries WHERE id = $1', [id]);
   }
 }
 
@@ -208,6 +253,7 @@ function toSubscription(row) {
       failedAttempts: Number(row.failed_attempts || 0),
       dead: Number(row.dead || 0),
       dlq: row.dlq_count,
+      retrying: row.retrying_count,
       lastNotificationAt: iso(row.last_notification_at),
       lastSuccessAt: iso(row.last_success_at),
       lastFailureAt: iso(row.last_failure_at),

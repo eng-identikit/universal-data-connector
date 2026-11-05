@@ -2,6 +2,7 @@ const axios = require('axios');
 const mqtt = require('mqtt');
 const nats = require('nats');
 const logger = require('../../utils/logger');
+const transformer = require('../transform/transformer');
 
 /**
  * Notification channels. send(sub, notification) resolves when the message
@@ -11,6 +12,10 @@ const logger = require('../../utils/logger');
  * With notify.perEntity each entity is sent as its own message (one HTTP call,
  * one MQTT/NATS publish per entity); placeholders in topics/subjects are then
  * expanded per entity.
+ *
+ * With an output transformer (notify.transformer from the library, or an inline
+ * notify.transform.expression) each message body is the transformer's result:
+ * JSON, or text when it returns a string; nothing is sent when it returns nothing.
  */
 
 /** Applies the attribute projection and the output format to the notification. */
@@ -46,11 +51,37 @@ function expand(template, sub, entity) {
 const natsToken = (s) => s.replace(/[.\s*>]/g, '_');
 
 class Channels {
-  constructor({ natsClient, hub }) {
+  constructor({ natsClient, hub, transformers = null }) {
     this.natsClient = natsClient;
     this.hub = hub;
+    this.transformers = transformers;
     this.mqttClients = new Map();
     this.natsConnections = new Map();
+  }
+
+  /** JSONata expression of the subscription's transformer, or null. */
+  _expression(sub) {
+    if (sub.notify.transform?.expression) return sub.notify.transform.expression;
+    if (!sub.notify.transformer) return null;
+    const t = this.transformers && this.transformers.find(sub.notify.transformer);
+    if (!t) throw new Error(`Transformer '${sub.notify.transformer}' not found`);
+    return t.expression;
+  }
+
+  /** Messages ready to send: [{ entity, body, payload, contentType, output }]. */
+  async render(sub, notification) {
+    const expression = this._expression(sub);
+    const list = messages(sub, notification);
+    if (!expression) {
+      return list.map(m => ({ ...m, payload: JSON.stringify(m.body), contentType: 'application/json', output: m.body }));
+    }
+    const rendered = [];
+    for (const m of list) {
+      const output = await transformer.evaluate(expression, { ...m.body, entity: m.body.entities[0] ?? null });
+      const serialized = transformer.toBody(output);
+      if (serialized) rendered.push({ ...m, payload: serialized.body, contentType: serialized.contentType, output });
+    }
+    return rendered;
   }
 
   async send(sub, notification) {
@@ -65,14 +96,16 @@ class Channels {
 
   async _http(sub, notification) {
     const { url, method = 'POST', headers = {}, timeoutMs = 10000 } = sub.notify;
-    for (const { body } of messages(sub, notification)) {
+    for (const { payload, contentType } of await this.render(sub, notification)) {
       try {
         await axios({
           url,
           method,
-          data: body,
+          data: payload,
           timeout: timeoutMs,
-          headers: { 'Content-Type': 'application/json', 'User-Agent': 'udc-broker', 'X-UDC-Subscription': sub.id, ...headers },
+          // Sent as is: the payload is already serialized
+          transformRequest: [(data) => data],
+          headers: { 'Content-Type': contentType, 'User-Agent': 'udc-broker', 'X-UDC-Subscription': sub.id, ...headers },
           maxRedirects: 0,
           validateStatus: (s) => s >= 200 && s < 300
         });
@@ -116,10 +149,10 @@ class Channels {
       });
     }
     const { qos = 1, retain = false } = sub.notify;
-    for (const { entity, body } of messages(sub, notification)) {
+    for (const { entity, payload } of await this.render(sub, notification)) {
       const topic = expand(sub.notify.topic, sub, entity);
       await new Promise((resolve, reject) => {
-        client.publish(topic, JSON.stringify(body), { qos, retain }, (err) => (err ? reject(new Error(`MQTT publish: ${err.message}`)) : resolve()));
+        client.publish(topic, payload, { qos, retain }, (err) => (err ? reject(new Error(`MQTT publish: ${err.message}`)) : resolve()));
       });
     }
   }
@@ -140,21 +173,27 @@ class Channels {
 
   async _nats(sub, notification) {
     const nc = await this._natsConnection(sub);
-    for (const { entity, body } of messages(sub, notification)) {
+    for (const { entity, payload } of await this.render(sub, notification)) {
       const subject = sub.notify.subject
         .replace(/\{tenant\}/g, natsToken(sub.tenant))
         .replace(/\{subscription\}/g, sub.id)
         .replace(/\{entityId\}/g, entity ? natsToken(entity.id) : '_')
         .replace(/\{entityType\}/g, entity ? entity.type : '_');
-      nc.publish(subject, JSON.stringify(body));
+      // A placeholder (e.g. a tenant named 'udc') must not reach the broker's own subjects
+      if (/^udc\./i.test(subject)) throw new Error(`NATS subject '${subject}' is reserved by the broker`);
+      nc.publish(subject, payload);
     }
     // flush() confirms the server received the messages
     await nc.flush();
   }
 
   async _websocket(sub, notification) {
-    // Live channel: clients that are not connected simply miss it, so this never fails
-    this.hub.publishNotification(sub.tenant, sub.id, shape(sub, notification));
+    // Live channel: clients that are not connected simply miss it
+    if (!this._expression(sub)) return this.hub.publishNotification(sub.tenant, sub.id, shape(sub, notification));
+    // With a transformer the message keeps its entities (for type filtering) and adds the output
+    for (const { body, output } of await this.render(sub, notification)) {
+      this.hub.publishNotification(sub.tenant, sub.id, { ...body, output });
+    }
   }
 
   async close() {

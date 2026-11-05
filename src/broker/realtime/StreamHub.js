@@ -7,6 +7,9 @@ const PATH = '/api/v1/stream';
 const MAX_BUFFERED_BYTES = 5 * 1024 * 1024;
 const MAX_CLIENT_SUBSCRIPTIONS = 50;
 const PING_MS = 30000;
+// Credentials of open connections are checked again at this interval
+// (revoked API keys, removed memberships, disabled users)
+const REVALIDATE_MS = 60000;
 
 /**
  * Authenticated WebSocket stream on /api/v1/stream.
@@ -22,8 +25,9 @@ const PING_MS = 30000;
  *   { type: 'notification', sub, notification }
  *   { type: 'error', message }
  *
- * The connection is closed with code 4001 when the access token expires;
- * clients reconnect with a fresh token.
+ * The connection is closed with code 4001 when the access token expires or
+ * its session is revoked, and with 4003 when the caller loses access to the
+ * tenant; clients reconnect with a fresh token.
  */
 class StreamHub {
   constructor({ services, bus, natsClient }) {
@@ -44,6 +48,17 @@ class StreamHub {
     }));
 
     this.bus.on('change', (change) => this._onChange(change));
+    this.bus.on('control', (msg) => {
+      if (msg.kind !== 'session-revoked') return;
+      for (const c of this.clients) {
+        if (c.auth.kind !== 'user') continue;
+        if ((msg.sid && c.auth.sessionId === msg.sid) || (msg.userId && c.auth.user.id === msg.userId)) {
+          c.ws.close(4001, 'Session revoked');
+        }
+      }
+    });
+    this.revalidateTimer = setInterval(() => this._revalidate(), REVALIDATE_MS);
+    if (this.revalidateTimer.unref) this.revalidateTimer.unref();
 
     // websocket-channel notifications delivered on another instance reach clients connected here
     if (this.nats.enabled) {
@@ -70,13 +85,16 @@ class StreamHub {
   }
 
   async _onConnection(ws, req) {
+    // Registered before authenticating, so a socket closed meanwhile is never added
+    let closed = false;
+    ws.on('close', () => { closed = true; });
     const url = new URL(req.url, 'http://localhost');
-    const auth = await resolveCaller(this.services, {
-      token: url.searchParams.get('access_token'),
-      apiKey: url.searchParams.get('api_key')
-    });
-    const ctx = await resolveTenant(this.services, auth, url.searchParams.get('tenant'), 'viewer');
-    const client = { ws, ctx, subs: new Map(), alive: true, expiryTimer: null };
+    const credentials = { token: url.searchParams.get('access_token'), apiKey: url.searchParams.get('api_key') };
+    const requestedTenant = url.searchParams.get('tenant');
+    const auth = await resolveCaller(this.services, credentials);
+    const ctx = await resolveTenant(this.services, auth, requestedTenant, 'viewer');
+    if (closed) return;
+    const client = { ws, auth, ctx, credentials, requestedTenant, subs: new Map(), alive: true, expiryTimer: null };
     this.clients.add(client);
 
     if (auth.tokenExp) {
@@ -149,9 +167,33 @@ class StreamHub {
   _deliverLocal(tenant, subscriptionId, notification) {
     for (const client of this.clients) {
       if (client.ctx.tenant !== tenant) continue;
+      let visible = notification;
+      // Type-restricted API keys only see the entities of their types
+      if (client.ctx.allowedTypes) {
+        const entities = (notification.entities || []).filter(e => client.ctx.allowedTypes.includes(e.type));
+        if (!entities.length) continue;
+        // A transformer output is computed over all entities: only whole notifications are shown
+        if (notification.output !== undefined && entities.length !== notification.entities.length) continue;
+        visible = { ...notification, entities };
+      }
       for (const [id, s] of client.subs) {
         if (s.kind === 'notifications' && s.subscriptionId === subscriptionId) {
-          this._send(client.ws, { type: 'notification', sub: id, notification });
+          this._send(client.ws, { type: 'notification', sub: id, notification: visible });
+        }
+      }
+    }
+  }
+
+  /** Closes connections whose credentials or tenant access are no longer valid. */
+  async _revalidate() {
+    for (const c of [...this.clients]) {
+      try {
+        const auth = await resolveCaller(this.services, c.credentials);
+        c.ctx = await resolveTenant(this.services, auth, c.requestedTenant, 'viewer');
+        c.auth = auth;
+      } catch (error) {
+        if (error.status === 401 || error.status === 403 || error.status === 404) {
+          c.ws.close(error.status === 401 ? 4001 : 4003, error.message.slice(0, 120));
         }
       }
     }
@@ -173,6 +215,7 @@ class StreamHub {
 
   close() {
     clearInterval(this.pingTimer);
+    clearInterval(this.revalidateTimer);
     if (this.wss) this.wss.close();
   }
 }

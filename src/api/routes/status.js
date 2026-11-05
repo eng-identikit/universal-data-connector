@@ -40,7 +40,12 @@ router.get('/', (req, res) => {
         totalErrors: status.stats.totalErrors,
         lastDataReceived: status.stats.lastDataReceived
       },
-      connectors: status.connectors,
+      connectors: Object.entries(status.connectors).map(([id, c]) => ({
+        id,
+        type: c.type,
+        enabled: c.enabled,
+        runtime: { status: c.status, lastActivity: c.lastActivity, stats: c.stats }
+      })),
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),

@@ -7,7 +7,7 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "node tests/run-tests.js",
-    "test:unit": "node tests/test-drivers.js && node tests/test-connectors.js && node tests/test-fieldbus.js && node tests/test-dds.js && node tests/test-mapping.js && node tests/test-storage.js",
+    "test:unit": "node tests/test-drivers.js && node tests/test-connectors.js && node tests/test-fieldbus.js && node tests/test-dds.js && node tests/test-mapping.js && node tests/test-storage.js && node tests/test-system-api.js",
     "test:udc": "node tests/test-udc.js",
     "test:connectors": "node tests/test-connectors.js",
     "test:fieldbus": "node tests/test-fieldbus.js",
@@ -16,7 +16,7 @@
     "test:storage": "node tests/test-storage.js",
     "test:dynamic-config": "node tests/test-dynamic-config.js",
     "test:drivers": "node tests/test-drivers.js",
-    "test:broker": "node tests/test-broker-model.js && node tests/test-broker-expression.js && node tests/test-broker-api.js && node tests/test-broker-subscriptions.js && node tests/test-broker-data.js && node tests/test-broker-geo.js && node tests/test-broker-cluster.js",
+    "test:broker": "node tests/test-broker-model.js && node tests/test-broker-expression.js && node tests/test-broker-pipeline.js && node tests/test-broker-api.js && node tests/test-broker-sessions.js && node tests/test-broker-subscriptions.js && node tests/test-broker-transformers.js && node tests/test-broker-data.js && node tests/test-broker-geo.js && node tests/test-broker-cluster.js",
     "build": "npm install"
   },
   "keywords": [
@@ -52,7 +52,7 @@
     "helmet": "^7.1.0",
     "ioredis": "^5.6.1",
     "joi": "^17.11.0",
-    "jsonata": "^2.1.0",
+    "jsonata": "^2.2.2",
     "jsonwebtoken": "^9.0.3",
     "lru-cache": "^11.2.4",
     "mariadb": "^3.2.2",

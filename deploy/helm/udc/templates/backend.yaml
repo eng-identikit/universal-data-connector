@@ -54,6 +54,10 @@ spec:
               value: {{ .Values.backend.historyRetention | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.backend.logLevel | quote }}
+            {{- if .Values.redis.enabled }}
+            - name: BROKER_REDIS_URL
+              value: {{ include "udc.redisUrl" . | quote }}
+            {{- end }}
             {{- with include "udc.mqttUrl" . }}
             - name: BROKER_MQTT_URL
               value: {{ . | quote }}

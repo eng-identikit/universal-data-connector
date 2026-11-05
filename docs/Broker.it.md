@@ -43,20 +43,21 @@ L'Universal Data Connector è un **context broker standalone**: legge i disposit
 - **NATS JetStream** fornisce le due code durevoli: ingest e notifiche. Le modifiche alle entità arrivano a tutte le istanze su NATS core, a pacchetti.
 - Senza `NATS_URL` il broker gira in **istanza singola** con code in memoria.
 
-### Servizi opzionali: NATS e MQTT
+### Servizi opzionali: NATS, MQTT e Redis
 
-Solo PostgreSQL è obbligatorio. NATS e Mosquitto si attivano da configurazione:
+Solo PostgreSQL è obbligatorio. NATS, Mosquitto e Redis si attivano da configurazione:
 
 | Servizio | Cosa offre | Senza |
 |---|---|---|
 | NATS JetStream | Code durevoli (at-least-once anche dopo un riavvio), modalità cluster, predefinito del canale `nats` | Una sola istanza; code in memoria, quindi le notifiche non ancora consegnate si perdono al riavvio; le subscription `nats` devono indicare `notify.url` |
 | MQTT (Mosquitto) | Broker predefinito del canale `mqtt` | Le subscription `mqtt` devono indicare `notify.url` |
+| Redis | Sessioni di login dietro i JWT, limite ai tentativi di login condiviso tra le istanze | Le sessioni stanno in PostgreSQL (una query in più per richiesta); il limite ai tentativi vale per istanza |
 
 Le subscription HTTP e WebSocket non richiedono nessuno dei due. Una subscription che conta su un broker predefinito non configurato viene rifiutata con 400, e il wizard della UI chiede l'URL.
 
-- **Compose**: `COMPOSE_PROFILES` in `.env` avvia i servizi inclusi (`nats`, `mqtt`, entrambi o nessuno). `COMPOSE_NATS_URL` e `COMPOSE_MQTT_URL` dicono al container del backend cosa usare (`nats://nats:4222`, `mqtt://mqtt:1883`, un server esterno, oppure vuoto). La modalità cluster richiede NATS.
-- **Helm**: `nats.enabled=false` toglie NATS (richiede `backend.replicas=1`); `mqtt.bundled=true` aggiunge un Mosquitto, oppure `mqtt.url` punta a uno esterno.
-- **Fuori dai container**: `NATS_URL` e `BROKER_MQTT_URL`.
+- **Compose**: `COMPOSE_PROFILES` in `.env` avvia i servizi inclusi (`nats`, `mqtt`, `redis`, in qualsiasi combinazione). `COMPOSE_NATS_URL`, `COMPOSE_MQTT_URL` e `COMPOSE_REDIS_URL` dicono al container del backend cosa usare (`nats://nats:4222`, `mqtt://mqtt:1883`, `redis://redis:6379`, un server esterno, oppure vuoto). La modalità cluster richiede NATS.
+- **Helm**: `nats.enabled=false` toglie NATS (richiede `backend.replicas=1`); `mqtt.bundled=true` aggiunge un Mosquitto, oppure `mqtt.url` punta a uno esterno; `redis.enabled` (attivo e incluso di default) o `redis.url` per un Redis esterno.
+- **Fuori dai container**: `NATS_URL`, `BROKER_MQTT_URL` e `BROKER_REDIS_URL`.
 
 ## Avvio
 
@@ -122,13 +123,15 @@ Tutte le route sono sotto `/api/v1`.
 
 | Area | Endpoint |
 |---|---|
-| Auth | `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me`, `POST /auth/password` |
+| Auth | `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/password`, `GET /auth/sessions`, `DELETE /auth/sessions/:id` |
 | Entità | `GET /entities` (`type`, `idPattern` con `*`, `related`+`depth`+`direction`, `bbox`, `near`+`maxDistance`, `georel`+`geometry`, `located`, `attrs`, `orderBy`, `limit`/`offset`; header `X-Total-Count`), `POST /entities`, `GET`/`PUT`/`PATCH`/`DELETE /entities/:id`, `PUT`/`PATCH`/`DELETE /entities/:id/attrs/:attr`, `GET /entities/:id/graph`, `GET /types` |
 | Scrittura in blocco | `POST /entities/batch` (sincrona e atomica: `upsert`, `create`, `update`, `delete`, al massimo 1000 elementi), `POST /ingest` (asincrona, al massimo 5000 per richiesta, risponde `202`), `GET /ingest/stats` |
 | Storico | `GET /entities/:id/history?attrs&from&to&maxPoints` (avg/min/max/last per intervallo), `GET /entities/:id/history/attributes`, `GET /entities/:id/history/:attr/raw` |
 | Comandi | `POST /entities/:id/attrs/:attr/command {value}` (`?wait=ms`), `GET /commands?entityId&status`, `GET /commands/:id` |
 | Subscription | `GET`/`POST /subscriptions`, `GET`/`PATCH`/`DELETE /subscriptions/:id`, `POST /:id/pause`, `POST /:id/resume`, `POST /:id/test`, `DELETE /:id/stats`, `GET /:id/dlq`, `POST /:id/dlq/replay`, `DELETE /:id/dlq`, `POST /subscriptions/preview`, `POST /expressions/validate` |
-| Amministrazione | `/users` (superadmin), `/tenants`, `/tenants/:id/members`, `/apikeys`, `GET /cluster` (superadmin) |
+| Transformer | `GET /transformers`, `GET`/`PUT`/`DELETE /transformers/:id`, `POST /transformers/preview` |
+| Amministrazione | `/users` (superadmin), `/tenants`, `/tenants/:id/members`, `/apikeys` (solo utenti, non API key), `GET /cluster` (superadmin) |
+| Sessioni e storico accessi (superadmin) | `GET /sessions?userId`, `DELETE /sessions/:id`, `DELETE /users/:id/sessions`, `GET /auth-events?userId&kind&from&to&limit&offset` |
 | Sistema | `/system/*`: connettori, mapping, configurazione storage, stato del motore. Lettura per tutti gli autenticati, modifiche solo per il superadmin. Ha sostituito la vecchia `/api`. |
 | Stream | `ws://host/api/v1/stream?access_token=…&tenant=…` |
 
@@ -186,11 +189,42 @@ Una subscription definisce quali entità osservare, quando notificare, con quale
 
 **Consegna**
 - La garanzia è **at-least-once**: retry con backoff esponenziale (`backoffMs × 2^n`, al massimo 5 minuti, con jitter).
+- Una notifica non consegnata esce dalla coda e attende nel database (`notification_retries`) il tentativo successivo; ogni istanza riprende quelle scadute. Un endpoint lento o irraggiungibile quindi non trattiene mai le notifiche delle altre subscription.
+- Finché un endpoint continua a fallire, le sue nuove notifiche si mettono in fila dietro i retry invece di aspettare ognuna un timeout. Le statistiche della subscription mostrano quante sono in attesa (`retrying`).
 - Dopo `maxRetries` la notifica passa nella **DLQ**, che si può ispezionare, reinviare o svuotare dall'API e dalla UI.
 - L'ordine fra notifiche non è garantito.
+- Un subject `nats` non può iniziare con `udc.`: sono i subject delle code interne del broker.
 
 **Altro**
 - Chi ha solo il ruolo viewer vede mascherati i segreti negli header (Authorization, token, key, password).
+
+### Transformer di uscita
+
+UDC fa il broker; cosa riceve il destinatario lo decide, per ogni subscription, un **transformer** opzionale: un'espressione [JSONata](https://jsonata.org) applicata a ogni messaggio prima dell'invio.
+
+- **Libreria**: transformer con un nome in `config/transformers.json`, condivisi da tutti i tenant. Si modificano dalla UI (pagina *Transformer*, superadmin) o a mano nel file: le modifiche valgono entro pochi secondi, senza riavvio, e in un cluster arrivano a tutte le istanze.
+- **Sulla subscription**: `notify.transformer: "<id>"` usa uno della libreria; `notify.transform: { "expression": "..." }` contiene un'espressione solo per quella subscription. Il wizard offre entrambe le strade, con un'anteprima su entità reali.
+- **Input**: la notifica (`{ id, subscriptionId, subscriptionName, tenant, reason, timestamp, entities }`, dopo `attrs` e `format`) più `entity` = la prima entità, comoda con `perEntity`.
+- **Output**: un oggetto o un array viene inviato come JSON (`application/json`); una stringa viene inviata così com'è (`text/plain`), per CSV o protocolli a righe; nessun risultato salta il messaggio (il transformer può fare da filtro aggiuntivo).
+- **Canali**: body HTTP, payload MQTT e NATS. Sul canale WebSocket il messaggio conserva `entities` e aggiunge `output`.
+- **Limiti**: 500 ms e 300 livelli di ricorsione per valutazione (`BROKER_TRANSFORM_TIMEOUT_MS`), regex compilate in modo sicuro come nei filtri. Un transformer che fallisce conta come consegna fallita (retry, poi DLQ con l'errore).
+
+`config/transformers.json`:
+
+```json
+{ "transformers": [
+  { "id": "flat-values", "name": "Valori piatti",
+    "expression": "[entities.$merge([{ \"id\": id, \"type\": type }, $each(attrs, function($v, $k) { { $k: $v.value } })])]" }
+] }
+```
+
+Esempi inclusi: `flat-values`, `envelope` (busta evento con valori semplici), `csv`, `influx-line` (line protocol di InfluxDB).
+
+| API | |
+|---|---|
+| `GET /transformers`, `GET /transformers/:id` | Libreria (qualsiasi chiamante autenticato) |
+| `PUT /transformers/:id`, `DELETE /transformers/:id` | Superadmin; un transformer usato da una subscription non si può eliminare (409 con l'elenco) |
+| `POST /transformers/preview` | `{ expression \| transformer, entityIds?, types?, notify?: { attrs, format, perEntity } }` → l'input e i messaggi che verrebbero inviati |
 
 ### Linguaggio dei filtri
 
@@ -209,6 +243,8 @@ Esempi:
 - `age(heartbeat.ts) > 300`
 
 La valutazione non lancia mai errori: tipi incompatibili rendono falso il confronto, e l'aritmetica su valori non numerici produce `null`.
+
+`matches` usa un motore di espressioni regolari a tempo lineare, quindi nessun pattern può bloccare il broker. Per questo non sono accettati backreference, lookahead e ripetizioni numerate grandi (`a{0,200}`), e le stringhe oltre i 1000 caratteri non corrispondono mai.
 
 ## Stream in tempo reale
 
@@ -266,11 +302,15 @@ Le subscription accettano `select.bbox`.
 
 **Password**
 - Salvate con scrypt.
-- Dopo 5 tentativi falliti in 15 minuti il login si blocca per quella coppia utente/IP.
+- Al massimo 5 tentativi di login per coppia utente/IP in 15 minuti; un login riuscito azzera il conteggio. Il tentativo viene contato prima di verificare la password, quindi le richieste in parallelo non aggirano il limite. Con Redis il conteggio è condiviso tra le istanze.
 
-**Token**
-- Access token da 15 minuti, refresh token da 7 giorni.
-- Cambiare la password o disabilitare l'utente revoca tutti i token emessi.
+**Sessioni e token**
+- Ogni login apre una sessione; l'access token da 15 minuti e il refresh token da 7 giorni ne portano l'id. Un token è accettato solo finché la sua sessione esiste: un logout o una revoca valgono dalla richiesta successiva su tutte le istanze, e gli stream aperti di quella sessione vengono chiusi con `4001`.
+- I refresh token si usano una volta sola: ogni refresh ne consegna uno nuovo. Ripresentare un refresh token già usato significa che è stato copiato, e l'intera sessione viene revocata (`refresh_reuse` nello storico accessi).
+- Cambiare la password, disabilitare o eliminare un utente chiude tutte le sue sessioni.
+- Le sessioni stanno in Redis (`BROKER_REDIS_URL`) oppure, senza, in PostgreSQL. La pagina Amministrazione le elenca (utente, indirizzo, client, inizio, ultima attività) e ne revoca una o tutte quelle di un utente.
+- Lo storico accessi (`auth_events`) registra login, tentativi falliti e bloccati, logout, refresh token riusati e revoche, con indirizzo e client. Viene conservato per `BROKER_AUTH_LOG_RETENTION_DAYS` (90) giorni.
+- Dietro un proxy l'indirizzo del client arriva da `X-Forwarded-For` quando il proxy è su una rete privata (`BROKER_TRUST_PROXY`, sintassi `trust proxy` di Express).
 
 **API key**
 - Salvate come hash SHA-256 e mostrate una sola volta.
@@ -321,7 +361,11 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 | `BROKER_INGEST_PARTITIONS` | 16 | Partizioni dell'ingest (uguale su tutte le istanze) |
 | `BROKER_HISTORY` / `BROKER_HISTORY_RETENTION` | `on` / — | Storico degli attributi e sua retention |
 | `BROKER_MQTT_URL` | — | Broker MQTT predefinito per le notifiche |
+| `BROKER_REDIS_URL` | — | Redis per sessioni e limite ai login (altrimenti PostgreSQL / per istanza) |
+| `BROKER_AUTH_LOG_RETENTION_DAYS` | 90 | Conservazione dello storico accessi |
+| `BROKER_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Proxy di cui fidarsi per `X-Forwarded-For` |
 | `BROKER_COMMAND_TIMEOUT_MS` | 10000 | Timeout dei comandi |
+| `BROKER_TRANSFORMERS_FILE` / `BROKER_TRANSFORM_TIMEOUT_MS` | `config/transformers.json` / 500 | Libreria dei transformer e tempo massimo di valutazione |
 | `UDC_RAW_STORAGE` | — | `memory` ignora `storage.json`, cioè il buffer dei dati grezzi dei connettori |
 | `PORT`, `BODY_LIMIT`, `LOG_LEVEL` | 3000, `5mb`, `info` | |
 

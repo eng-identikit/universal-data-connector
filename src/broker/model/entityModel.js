@@ -29,8 +29,11 @@ function assertEntityType(type) {
   }
 }
 
+// Valid identifiers that would clash with Object.prototype when used as keys
+const RESERVED_ATTR_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+
 function assertAttrName(name) {
-  if (!ATTR_NAME_RE.test(name)) {
+  if (!ATTR_NAME_RE.test(name) || RESERVED_ATTR_NAMES.has(name)) {
     throw badRequest(`Invalid attribute name '${name}': must match ${ATTR_NAME_RE}`, { field: `attrs.${name}` });
   }
 }

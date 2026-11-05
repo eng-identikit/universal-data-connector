@@ -7,7 +7,6 @@ const logger = require('../../utils/logger');
  * 
  * Provides endpoints for accessing mapped data in various formats:
  * - Universal Data Model (JSON)
- * - NGSI-LD
  * - TOON
  */
 
@@ -151,41 +150,6 @@ router.get('/export/json', (req, res) => {
 });
 
 /**
- * GET /api/mapping/export/ngsi-ld
- * Export mapped data to NGSI-LD format
- */
-router.get('/export/ngsi-ld', (req, res) => {
-  try {
-    if (!engine) {
-      return res.status(503).json({
-        success: false,
-        error: 'Engine not initialized'
-      });
-    }
-
-    const options = {
-      context: req.query.context
-    };
-
-    const ngsiLdData = engine.exportMappedDataToNGSILD(options);
-    
-    res.json({
-      success: true,
-      format: 'NGSI-LD',
-      count: ngsiLdData.length,
-      entities: ngsiLdData
-    });
-    
-  } catch (error) {
-    logger.error('Error exporting to NGSI-LD:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-/**
  * GET /api/mapping/export/toon
  * Export mapped data to TOON format
  */
@@ -299,10 +263,10 @@ router.get('/health', (req, res) => {
         totalMappings: stats.totalMappings,
         successfulMappings: stats.successfulMappings,
         failedMappings: stats.failedMappings,
-        entities: stats.dataModel.totalEntities,
-        relationships: stats.dataModel.totalRelationships
+        devices: stats.dataModelStats.totalDevices,
+        configuredDevices: stats.configuredDevices
       },
-      registeredMappers: stats.registeredMappers
+      registeredMappers: stats.mappersCount
     });
     
   } catch (error) {

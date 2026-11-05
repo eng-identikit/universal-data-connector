@@ -7,7 +7,6 @@ const sourcesRoutes = require('./routes/sources');
 const dataRoutes = require('./routes/data');
 const configRoutes = require('./routes/config');
 const mappingRoutes = require('./routes/mapping');
-const historyRoutes = require('./routes/history');
 
 // Authentication is applied by the broker (systemGuard) where this router is mounted
 
@@ -17,7 +16,6 @@ router.use('/sources', sourcesRoutes);
 router.use('/data', dataRoutes);
 router.use('/config', configRoutes);
 router.use('/mapping', mappingRoutes.router);
-router.use('/history', historyRoutes);
 
 // API documentation endpoint
 router.get('/', (req, res) => {
@@ -38,13 +36,6 @@ router.get('/', (req, res) => {
         'POST /api/v1/system/sources/:id/stop': 'Stop a source',
         'POST /api/v1/system/sources/:id/restart': 'Restart a source'
       },
-      history: {
-        'GET /api/v1/system/history/status': 'TimescaleDB availability and recorded time range',
-        'GET /api/v1/system/history/sources': 'Sources with historical data',
-        'GET /api/v1/system/history/measurements?source=': 'Measurements recorded for a source',
-        'GET /api/v1/system/history/series?source=&measurements=&startTime=&endTime=&maxPoints=': 'Downsampled time series (avg/min/max/last)',
-        'GET /api/v1/system/history/records?source=&startTime=&endTime=&limit=&offset=': 'Raw historical records'
-      },
       data: {
         'GET /api/v1/system/data/latest': 'Get latest data points',
         'GET /api/v1/system/data/source/:id': 'Get data from specific source',
@@ -61,7 +52,6 @@ router.get('/', (req, res) => {
         'GET /api/v1/system/mapping/entities/:id': 'Get specific mapped entity',
         'GET /api/v1/system/mapping/entities/type/:type': 'Get entities by type',
         'GET /api/v1/system/mapping/export/json': 'Export mapped data to JSON',
-        'GET /api/v1/system/mapping/export/ngsi-ld': 'Export mapped data to NGSI-LD',
         'GET /api/v1/system/mapping/export/toon': 'Export mapped data to TOON',
         'GET /api/v1/system/mapping/statistics': 'Get mapping statistics',
         'GET /api/v1/system/mapping/health': 'Get mapping engine health',

@@ -334,6 +334,19 @@ class DataStore {
     };
   }
 
+  /** Buffer statistics plus, when an external storage is in use, its own statistics. */
+  async getAllStats() {
+    const stats = this.getStats();
+    if (this.useExternalStorage && this.storageAdapter) {
+      try {
+        stats.external = { type: this.storageConfig.type, ...(await this.storageAdapter.getStats()) };
+      } catch (error) {
+        stats.external = { type: this.storageConfig.type, error: error.message };
+      }
+    }
+    return stats;
+  }
+
   search(query) {
     if (this.useExternalStorage && this.storageAdapter) {
       return this.storageAdapter.search(query).catch(error => {
@@ -382,6 +395,16 @@ class DataStore {
     const clearedCount = this.data.length;
     this.data = [];
     logger.info(`Cleared ${clearedCount} data points from store`);
+    return clearedCount;
+  }
+
+  /** Clears the memory buffer and, when in use, the external storage. Returns the memory count. */
+  async clearAll() {
+    const clearedCount = this.clear();
+    if (this.useExternalStorage && this.storageAdapter) {
+      await this.storageAdapter.clear();
+      logger.info(`Cleared ${this.storageConfig.type} storage`);
+    }
     return clearedCount;
   }
 

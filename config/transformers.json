@@ -1,0 +1,28 @@
+{
+  "transformers": [
+    {
+      "id": "csv",
+      "name": "CSV (one row per attribute)",
+      "description": "Text: entityId,type,attribute,value,unit,timestamp. One line per attribute.",
+      "expression": "$join(entities.($e := $; $each($e.attrs, function($v, $k) { $join([$e.id, $e.type, $k, $string($v.type = 'relationship' ? $v.target : $v.value), $v.unit ? $v.unit : '', $v.ts ? $v.ts : $e.updatedAt], ',') })), '\\n')"
+    },
+    {
+      "id": "envelope",
+      "name": "Event envelope",
+      "description": "JSON: { event, subscription, sentAt, items: [{ id, type, values }] } with plain values instead of attribute objects.",
+      "expression": "{\n  \"event\": reason,\n  \"subscription\": subscriptionName,\n  \"sentAt\": timestamp,\n  \"items\": [entities.{\n    \"id\": id,\n    \"type\": type,\n    \"values\": $merge($each(attrs, function($v, $k) { { $k: $v.type = 'relationship' ? $v.target : $v.value } }))\n  }]\n}"
+    },
+    {
+      "id": "flat-values",
+      "name": "Flat values",
+      "description": "JSON array: [{ id, type, <attribute>: <value>, ... }], one object per entity.",
+      "expression": "[entities.$merge([{ \"id\": id, \"type\": type }, $each(attrs, function($v, $k) { { $k: $v.type = 'relationship' ? $v.target : $v.value } })])]"
+    },
+    {
+      "id": "influx-line",
+      "name": "InfluxDB line protocol",
+      "description": "Text: <type>,id=<entityId> <numeric attributes> <timestamp in ns>. Non-numeric attributes are skipped.",
+      "expression": "$join(entities.($e := $; $fields := $each($e.attrs, function($v, $k) { $type($v.value) = 'number' ? $k & '=' & $string($v.value) }); $count($fields) > 0 ? $e.type & ',id=' & $replace($e.id, /[ ,=]/, '_') & ' ' & $join($fields, ',') & ' ' & $string($toMillis($e.updatedAt)) & '000000'), '\\n')"
+    }
+  ]
+}

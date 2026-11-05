@@ -12,9 +12,12 @@ const UserService = require('./services/UserService');
 const TenantService = require('./services/TenantService');
 const ApiKeyService = require('./services/ApiKeyService');
 const HistoryService = require('./services/HistoryService');
+const AuthEventService = require('./services/AuthEventService');
+const { createSessionStore } = require('./auth/SessionStore');
 const SubscriptionService = require('./subscriptions/SubscriptionService');
 const SubscriptionEngine = require('./subscriptions/SubscriptionEngine');
-const { defaultBrokers } = require('./subscriptions/subscriptionSchema');
+const { defaultBrokers, setTransformerLookup } = require('./subscriptions/subscriptionSchema');
+const TransformerService = require('./transform/TransformerService');
 const NatsClient = require('./messaging/NatsClient');
 const ChangeBus = require('./messaging/ChangeBus');
 const { JetStreamQueue, MemoryQueue } = require('./messaging/WorkQueue');
@@ -31,6 +34,7 @@ const adminRoutes = require('./api/adminRoutes');
 const entityRoutes = require('./api/entityRoutes');
 const subscriptionRoutes = require('./api/subscriptionRoutes');
 const dataRoutes = require('./api/dataRoutes');
+const transformerRoutes = require('./api/transformerRoutes');
 
 const RETRY_INTERVAL_MS = 5000;
 
@@ -60,6 +64,11 @@ class Broker {
       users: new UserService(this.pool),
       tenants: new TenantService(this.pool),
       apiKeys: new ApiKeyService(this.pool),
+      // Login sessions: Redis with BROKER_REDIS_URL, otherwise PostgreSQL
+      sessions: createSessionStore(this.pool),
+      authEvents: new AuthEventService(this.pool),
+      // Output transformer library (config/transformers.json)
+      transformers: new TransformerService(),
       subscriptions: new SubscriptionService(this.pool)
     };
     this.services.commands = new CommandService({ pool: this.pool, entities: this.services.entities, natsClient: this.nats });
@@ -81,7 +90,9 @@ class Broker {
     });
     this.bridge = new ConnectorBridge({ ingest: this.ingest });
     this.hub = new StreamHub({ services: this.services, bus: this.bus, natsClient: this.nats });
-    this.channels = new Channels({ natsClient: this.nats, hub: this.hub });
+    this.services.transformers.start();
+    setTransformerLookup((id) => this.services.transformers.find(id));
+    this.channels = new Channels({ natsClient: this.nats, hub: this.hub, transformers: this.services.transformers });
     this.worker = new DeliveryWorker({
       queue: this.notifyQueue,
       engine: this.engine,
@@ -104,7 +115,7 @@ class Broker {
         this.ingest.queue.setPartitionFilter((p) => this.cluster.ownsIngestPartition(p));
         // BROKER_CONFIG_SYNC=false keeps config files local (e.g. instances with different sources on purpose)
         if (process.env.BROKER_CONFIG_SYNC !== 'false') {
-          this.configSync = new ConfigSync({ pool: this.pool, bus: this.bus, instanceId: this.instanceId });
+          this.configSync = new ConfigSync({ pool: this.pool, bus: this.bus, instanceId: this.instanceId, transformers: this.services.transformers });
         }
       } else {
         logger.warn('BROKER_CLUSTER=true ignored: clustering needs NATS_URL');
@@ -133,19 +144,28 @@ class Broker {
     try {
       if (!this.dbReady) {
         await migrate(this.pool);
+        await this.services.sessions.start();
         await this.services.users.bootstrap();
         await this.services.history.configureRetention();
         await this.services.entities.detectGeo();
         this.dbReady = true;
       }
       if (!this.messagingReady) {
-        await this.nats.connect();
-        this.bus.start();
-        await this.worker.start();
-        await this.ingest.start();
-        await this.engine.start();
-        if (this.cluster) await this.cluster.start();
-        if (this.configSync) this.configSync.start();
+        // A retry after a failure resumes at the step that failed (no duplicate consumers)
+        const done = this.startedSteps || (this.startedSteps = new Set());
+        const step = async (name, fn) => {
+          if (done.has(name)) return;
+          await fn();
+          done.add(name);
+        };
+        await step('nats', () => this.nats.connect());
+        await step('bus', () => this.bus.start());
+        // Subscriptions loaded before the worker consumes their notifications
+        await step('engine', () => this.engine.start());
+        await step('worker', () => this.worker.start());
+        await step('ingest', () => this.ingest.start());
+        if (this.cluster) await step('cluster', () => this.cluster.start({ ingestQueue: this.ingest.queue }));
+        if (this.configSync) await step('configSync', () => this.configSync.start());
         this.messagingReady = true;
       }
       this.ready = true;
@@ -156,6 +176,25 @@ class Broker {
       logger.error(`Broker not ready (${error.message}), retrying in ${RETRY_INTERVAL_MS / 1000}s`);
       if (!this.stopped) this.retryTimer = setTimeout(() => this.start(), RETRY_INTERVAL_MS);
     }
+  }
+
+  /** Ends a session everywhere: its tokens stop working and its streams are closed. */
+  async revokeSession(sid) {
+    const userId = await this.services.sessions.revoke(sid);
+    this.bus.control({ kind: 'session-revoked', sid });
+    return userId;
+  }
+
+  /** Ends every session of a user (password change, disable, delete, admin revoke). */
+  async revokeUserSessions(userId) {
+    const sids = await this.services.sessions.revokeUser(userId);
+    this.bus.control({ kind: 'session-revoked', userId });
+    return sids;
+  }
+
+  /** A shared configuration file changed through the API: other instances pull it (cluster). */
+  configChanged(key) {
+    if (this.configSync) this.configSync.push(key).catch(e => logger.error(`Config sync (${key}): ${e.message}`));
   }
 
   /** Attaches the realtime WebSocket stream to the HTTP server. */
@@ -174,16 +213,21 @@ class Broker {
   async stop() {
     this.stopped = true;
     clearTimeout(this.retryTimer);
-    if (this.cluster) await this.cluster.stop();
+    // Buffered updates and trailing throttled notifications are published first,
     await this.ingest.stop().catch(() => {});
     await this.engine.stop().catch(() => {});
+    this.worker.stop();
+    // then the queues finish what they are processing, and only then are the leases
+    // handed over: the next owner of a partition never runs concurrently with us
+    await Promise.all([this.notifyQueue.stop(), this.ingest.queue.stop()]).catch(() => {});
+    if (this.cluster) await this.cluster.stop();
     this.services.commands.close();
-    this.notifyQueue.stop();
-    this.ingest.queue.stop();
     this.hub.close();
+    this.services.transformers.stop();
     this.bus.stop();
     await this.channels.close();
     await this.nats.close();
+    await this.services.sessions.close();
     await this.pool.end();
   }
 
@@ -197,6 +241,7 @@ class Broker {
       messaging: this.nats.enabled ? (this.nats.connected ? 'nats' : 'nats-disconnected') : 'memory',
       // Notification channels usable without an explicit notify.url
       defaultBrokers: defaultBrokers(),
+      sessions: this.services.sessions.kind,
       error: this.lastError
     };
   }
@@ -269,6 +314,7 @@ class Broker {
     router.use(entityRoutes(deps));
     router.use(subscriptionRoutes(deps));
     router.use(dataRoutes(deps));
+    router.use(transformerRoutes(deps));
     router.get('/cluster', requireSuperadmin, (req, res, next) => this.clusterStatus().then(s => res.json(s)).catch(next));
     router.use(adminRoutes(deps));
 

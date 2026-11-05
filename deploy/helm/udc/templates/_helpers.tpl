@@ -31,6 +31,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.mqtt.bundled -}}mqtt://{{ include "udc.fullname" . }}-mqtt:1883{{- else -}}{{ .Values.mqtt.url }}{{- end -}}
 {{- end -}}
 
+{{- define "udc.redisUrl" -}}
+{{- if .Values.redis.bundled -}}redis://{{ include "udc.fullname" . }}-redis:6379{{- else -}}{{ required "redis.url is required when redis.bundled=false" .Values.redis.url }}{{- end -}}
+{{- end -}}
+
 {{/* Value of an existing secret key, so generated secrets survive upgrades */}}
 {{- define "udc.secretValue" -}}
 {{- $existing := lookup "v1" "Secret" .ctx.Release.Namespace (printf "%s-secrets" (include "udc.fullname" .ctx)) -}}

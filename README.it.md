@@ -176,9 +176,9 @@ I dati mappati vengono salvati nello storage configurato in `config/storage.json
 
 - **Fallback**: se all'avvio lo storage non è raggiungibile, il server parte comunque e tiene i dati in memoria. Riprova a connettersi ogni 30 s (`STORAGE_RETRY_INTERVAL`) e, quando lo storage torna disponibile, ci trasferisce i dati accumulati.
 - **Cambio a caldo**: lo storage si può cambiare a runtime (`POST /api/config/storage/configure`). Il nuovo storage viene connesso prima di sostituire il vecchio, quindi se il cambio fallisce resta attivo quello attuale.
-- **API Storico**: `/api/history/*` legge i dati registrati in TimescaleDB, ricampionati con `time_bucket` (avg/min/max/last per intervallo). Funziona anche quando l'engine sta scrivendo su un altro storage.
+- **Storico**: lo storico degli attributi delle entità è tenuto dal broker in TimescaleDB (`GET /api/v1/entities/:id/history/...`, vedi la [guida al broker](./docs/Broker.it.md)).
 
-Dettagli: [Guida Storage](./docs/Storage.it.md), [endpoint History](./docs/API.it.md#history-endpoints-timescaledb).
+Dettagli: [Guida Storage](./docs/Storage.it.md).
 
 ### 6. **Stream in Tempo Reale (WebSocket)**
 
@@ -200,12 +200,11 @@ universal-data-connector/
 │   ├── sources.json          # Configurazione sorgenti dati
 │   └── storage.json          # Configurazione storage (opzionale)
 ├── src/
-│   ├── server.js             # REST API (porta 3000) + WebSocket (porta 3001)
-│   ├── api/routes/           # Route REST (status, sources, data, history, config, ...)
+│   ├── server.js             # REST API e stream WebSocket (porta 3000)
+│   ├── api/routes/           # Route di sistema (status, sources, data, config, mapping)
 │   ├── connectors/protocols/ # Un connettore per protocollo (OPC UA, Modbus, PROFINET, EtherCAT, ...)
 │   ├── storage/
-│   │   ├── StorageFactory.js     # Adapter Memory, Redis, TimescaleDB
-│   │   └── TimescaleHistory.js   # Query storico (ricampionamento time_bucket)
+│   │   └── StorageFactory.js     # Adapter Memory, Redis, TimescaleDB
 │   ├── mappingTools/
 │   │   ├── MappingEngine.js      # Gestione mapping e discovery
 │   │   ├── UniversalDataModel.js # Modello dati unificato

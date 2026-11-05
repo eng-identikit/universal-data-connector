@@ -113,11 +113,15 @@ class EntityService extends EventEmitter {
       const [from, to] = direction === 'in' ? ['source_id', 'target_id'] : ['target_id', 'source_id'];
       const rel = add(query.related);
       const max = add(depth);
+      // Type-restricted credentials do not traverse entities they cannot see
+      const hop = ctx.allowedTypes
+        ? `JOIN entities he ON he.tenant = $1 AND he.id = er.${from} AND he.type = ANY(${add(ctx.allowedTypes)})`
+        : '';
       cte = `WITH RECURSIVE reach(id, depth) AS (
-          SELECT ${from}, 1 FROM entity_relationships WHERE tenant = $1 AND ${to} = ${rel}
+          SELECT er.${from}, 1 FROM entity_relationships er ${hop} WHERE er.tenant = $1 AND er.${to} = ${rel}
           UNION
           SELECT er.${from}, reach.depth + 1 FROM entity_relationships er
-            JOIN reach ON er.${to} = reach.id
+            JOIN reach ON er.${to} = reach.id ${hop}
            WHERE er.tenant = $1 AND reach.depth < ${max}
         ) `;
       where.push('id IN (SELECT id FROM reach)');
@@ -204,12 +208,21 @@ class EntityService extends EventEmitter {
         `SELECT source_id, attr, target_id FROM entity_relationships WHERE tenant = $1 AND (${conditions.join(' OR ')})`,
         [ctx.tenant, frontier]
       );
-      const next = [];
+      let next = [];
       for (const r of rows) {
         edges.set(`${r.source_id}|${r.attr}`, { source: r.source_id, attr: r.attr, target: r.target_id });
         for (const n of [r.source_id, r.target_id]) {
           if (!visited.has(n)) { visited.add(n); next.push(n); }
         }
+      }
+      if (ctx.allowedTypes && next.length) {
+        // Hidden entities are not expanded: what lies behind them stays hidden
+        const { rows: hidden } = await this.pool.query(
+          'SELECT id FROM entities WHERE tenant = $1 AND id = ANY($2) AND NOT (type = ANY($3))',
+          [ctx.tenant, next, ctx.allowedTypes]
+        );
+        const skip = new Set(hidden.map(h => h.id));
+        next = next.filter(n => !skip.has(n));
       }
       frontier = next;
     }
@@ -254,14 +267,14 @@ class EntityService extends EventEmitter {
     if (input === null || input === undefined) throw badRequest('Attribute body is required');
     return this._update(ctx, id, expectedVersion, (existing, now) => {
       const attrs = { ...existing.attrs };
-      attrs[name] = model.normalizeAttr(name, input, merge ? existing.attrs[name] : null, now);
+      attrs[name] = model.normalizeAttr(name, input, merge && Object.hasOwn(existing.attrs, name) ? existing.attrs[name] : null, now);
       return { ...existing, attrs };
     });
   }
 
   async deleteAttr(ctx, id, name, expectedVersion) {
     return this._update(ctx, id, expectedVersion, (existing) => {
-      if (!(name in existing.attrs)) throw notFound(`Attribute '${name}' not found on entity '${id}'`);
+      if (!Object.hasOwn(existing.attrs, name)) throw notFound(`Attribute '${name}' not found on entity '${id}'`);
       const attrs = { ...existing.attrs };
       delete attrs[name];
       return { ...existing, attrs };
@@ -544,7 +557,7 @@ function fastEntity(content, row) {
 function project(entity, attrs) {
   if (!attrs.length) return entity;
   const picked = {};
-  for (const name of attrs) if (name in entity.attrs) picked[name] = entity.attrs[name];
+  for (const name of attrs) if (Object.hasOwn(entity.attrs, name)) picked[name] = entity.attrs[name];
   return { ...entity, attrs: picked };
 }
 
@@ -594,3 +607,4 @@ function globToLike(glob) {
 
 module.exports = EntityService;
 module.exports.globToLike = globToLike;
+module.exports.parseIntParam = parseIntParam;

@@ -3,6 +3,7 @@ const path = require('path');
 const Joi = require('joi');
 const logger = require('../utils/logger');
 const ConnectorFactory = require('../connectors/ConnectorFactory');
+const { restoreMasked } = require('../api/secrets');
 
 // Schema per validazione configurazione sources
 const sourceConfigSchema = Joi.object({
@@ -46,6 +47,13 @@ const sourceConfigSchema = Joi.object({
   ).required()
 });
 
+/** Configuration error caused by the input (the API answers 400). */
+function invalid(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
 class ConfigManager {
   constructor() {
     this.configPath = path.join(process.cwd(), 'config');
@@ -88,13 +96,7 @@ class ConfigManager {
       const configData = await fs.readFile(this.sourcesConfigFile, 'utf8');
       const config = JSON.parse(configData);
 
-      // Validate configuration
-      const { error, value } = sourceConfigSchema.validate(config);
-      if (error) {
-        throw new Error(`Invalid configuration: ${error.details[0].message}`);
-      }
-
-      this.sources = value.sources;
+      this.sources = this.validateSources(config.sources);
       logger.info(`Loaded ${this.sources.length} source configurations`);
 
     } catch (error) {
@@ -197,6 +199,35 @@ class ConfigManager {
     logger.info('Created default sources configuration');
   }
 
+  /**
+   * Validates a complete list of sources (schema, unique ids) and returns it
+   * with defaults applied. Throws a 400 error when invalid.
+   */
+  validateSources(sources) {
+    const { error, value } = sourceConfigSchema.validate({ sources });
+    if (error) {
+      throw invalid(`Invalid configuration (validation): ${error.details[0].message}`);
+    }
+    const seen = new Set();
+    for (const source of value.sources) {
+      if (seen.has(source.id)) throw invalid(`Invalid configuration (validation): duplicate source id '${source.id}'`);
+      seen.add(source.id);
+    }
+    return value.sources;
+  }
+
+  /**
+   * Replaces all sources: validated first, so an invalid list never reaches the file.
+   * Masked secrets coming back from the UI keep their stored value.
+   */
+  async replaceSources(sources) {
+    if (!Array.isArray(sources)) throw invalid('Invalid configuration (validation): sources must be an array');
+    const validated = this.validateSources(restoreMasked(sources, this.sources));
+    await this.saveSourcesConfig(validated);
+    this.sources = validated;
+    return validated;
+  }
+
   getSources() {
     return this.sources;
   }
@@ -219,19 +250,25 @@ class ConfigManager {
       throw new Error(`Source with id '${id}' not found`);
     }
 
-    // Merge updates with existing source
-    const updatedSource = { ...this.sources[sourceIndex], ...updates };
+    if (updates.id !== undefined && updates.id !== id) {
+      throw invalid('Invalid source configuration: the id cannot be changed');
+    }
+
+    // Merge updates with existing source; masked secrets keep their stored value
+    const current = this.sources[sourceIndex];
+    const updatedSource = { ...current, ...restoreMasked(updates, current) };
 
     // Validate updated source
     const { error } = sourceConfigSchema.validate({ sources: [updatedSource] });
     if (error) {
-      throw new Error(`Invalid source configuration: ${error.details[0].message}`);
+      throw invalid(`Invalid source configuration: ${error.details[0].message}`);
     }
 
-    this.sources[sourceIndex] = updatedSource;
-
-    // Save to file
-    await this.saveSourcesConfig();
+    // Save to file before changing the in-memory list
+    const sources = this.sources.slice();
+    sources[sourceIndex] = updatedSource;
+    await this.saveSourcesConfig(sources);
+    this.sources = sources;
 
     logger.info(`Updated source configuration: ${id}`);
     return updatedSource;
@@ -246,13 +283,13 @@ class ConfigManager {
     // Validate source configuration
     const { error } = sourceConfigSchema.validate({ sources: [sourceConfig] });
     if (error) {
-      throw new Error(`Invalid source configuration: ${error.details[0].message}`);
+      throw invalid(`Invalid source configuration: ${error.details[0].message}`);
     }
 
-    this.sources.push(sourceConfig);
-
-    // Save to file
-    await this.saveSourcesConfig();
+    // Save to file before changing the in-memory list
+    const sources = [...this.sources, sourceConfig];
+    await this.saveSourcesConfig(sources);
+    this.sources = sources;
 
     logger.info(`Added new source configuration: ${sourceConfig.id}`);
     return sourceConfig;
@@ -264,22 +301,25 @@ class ConfigManager {
       throw new Error(`Source with id '${id}' not found`);
     }
 
-    const removedSource = this.sources.splice(sourceIndex, 1)[0];
+    const removedSource = this.sources[sourceIndex];
 
-    // Save to file
-    await this.saveSourcesConfig();
+    // Save to file before changing the in-memory list
+    const sources = this.sources.filter((_, i) => i !== sourceIndex);
+    await this.saveSourcesConfig(sources);
+    this.sources = sources;
 
     logger.info(`Removed source configuration: ${id}`);
     return removedSource;
   }
 
-  async saveSourcesConfig() {
-    const config = { sources: this.sources };
-    await fs.writeFile(
-      this.sourcesConfigFile,
-      JSON.stringify(config, null, 2),
-      'utf8'
-    );
+  /**
+   * Writes sources.json atomically (temporary file + rename): the config
+   * directory is shared by every instance, a reader never sees a partial file.
+   */
+  async saveSourcesConfig(sources = this.sources) {
+    const tmp = `${this.sourcesConfigFile}.${process.pid}.tmp`;
+    await fs.writeFile(tmp, JSON.stringify({ sources }, null, 2), 'utf8');
+    await fs.rename(tmp, this.sourcesConfigFile);
   }
 
   async reloadConfig() {

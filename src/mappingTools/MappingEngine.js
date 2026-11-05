@@ -121,8 +121,17 @@ class MappingEngine {
   async saveMappingConfig() {
     try {
       const devices = Array.from(this.mappingConfigs.values());
-      
+
+      // The same file holds other sections (transport, outputFormats): keep them
+      let existing = {};
+      try {
+        existing = JSON.parse(await fs.readFile(this.mappingConfigPath, 'utf8'));
+      } catch {
+        existing = {};
+      }
+
       const config = {
+        ...existing,
         version: '2.0.0',
         updated: new Date().toISOString(),
         discoveryMode: this.discoveryMode,
@@ -133,11 +142,10 @@ class MappingEngine {
       const dir = path.dirname(this.mappingConfigPath);
       await fs.mkdir(dir, { recursive: true });
 
-      await fs.writeFile(
-        this.mappingConfigPath, 
-        JSON.stringify(config, null, 2), 
-        'utf8'
-      );
+      // Write to a temporary file and rename, so a crash never leaves a truncated file
+      const tmp = `${this.mappingConfigPath}.${process.pid}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(config, null, 2), 'utf8');
+      await fs.rename(tmp, this.mappingConfigPath);
       
       logger.info(`Saved ${devices.length} device configurations to ${this.mappingConfigPath}`);
       return true;
@@ -319,15 +327,6 @@ class MappingEngine {
    */
   getEntitiesByType(type) {
     return this.dataModel.getDevicesByType(type);
-  }
-
-  /**
-   * Export data in NGSI-LD JSON format
-   * @param {Object} options - Export options
-   * @returns {Object} JSON representation
-   */
-  exportToNGSILD(options = {}) {
-    return this.exportData('json', options);
   }
 
   /**

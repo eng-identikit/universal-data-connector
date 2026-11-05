@@ -31,6 +31,25 @@ class JetStreamQueue {
     this.iterators = [];
     // Cluster: which partitions this instance consumes (lease owner); all when unset
     this.partitionFilter = null;
+    this.active = new Map(); // partition → promise of the group being applied
+    this.inFlight = new Set(); // unpartitioned: promises of messages being processed
+  }
+
+  _owns(partition) {
+    return !this.partitionFilter || this.partitionFilter(partition);
+  }
+
+  /**
+   * Resolves once no group of the partition is being applied here (or after
+   * timeoutMs). Called after the partition was given up and before its lease is
+   * released, so the next owner never runs concurrently with this one.
+   */
+  async whenIdle(partition, timeoutMs = 10000) {
+    const running = this.active.get(partition);
+    if (!running) return;
+    let timer;
+    await Promise.race([running, new Promise(r => { timer = setTimeout(r, timeoutMs); })]);
+    clearTimeout(timer);
   }
 
   setPartitionFilter(filter) {
@@ -84,7 +103,7 @@ class JetStreamQueue {
     const consumer = await this.nats.js.consumers.get(this.stream, durable);
     (async () => {
       while (!this.stopped) {
-        if (this.partitionFilter && !this.partitionFilter(partition)) {
+        if (!this._owns(partition)) {
           await new Promise(r => setTimeout(r, 500));
           continue;
         }
@@ -95,7 +114,18 @@ class JetStreamQueue {
           const fetched = [first];
           const more = this.nats.js.fetch(this.stream, durable, { batch: SERIAL_FETCH - 1, no_wait: true });
           for await (const msg of more) fetched.push(msg);
-          await this._processGroup(fetched, handler, merge);
+          // The partition may have been given up (or the queue stopped) while waiting
+          if (this.stopped || !this._owns(partition)) {
+            fetched.forEach(m => m.nak());
+            continue;
+          }
+          const group = this._processGroup(fetched, handler, merge);
+          this.active.set(partition, group);
+          try {
+            await group;
+          } finally {
+            this.active.delete(partition);
+          }
         } catch (error) {
           if (this.stopped) break;
           logger.error(`WorkQueue ${durable}: fetch error, retrying: ${error.message}`);
@@ -130,7 +160,11 @@ class JetStreamQueue {
           for await (const msg of iterator) {
             if (running >= concurrency) await new Promise(resolve => waiters.push(resolve));
             running++;
-            this._process(msg, handler).finally(release);
+            const processing = this._process(msg, handler).finally(() => {
+              this.inFlight.delete(processing);
+              release();
+            });
+            this.inFlight.add(processing);
           }
         } catch (error) {
           if (this.stopped) break;
@@ -217,9 +251,16 @@ class JetStreamQueue {
     }
   }
 
-  stop() {
+  /** Stops fetching and resolves once the work in progress has been settled (max 10 s). */
+  async stop() {
     this.stopped = true;
     this.iterators.forEach(it => it.stop());
+    let timer;
+    await Promise.race([
+      Promise.allSettled([...this.active.values(), ...this.inFlight]),
+      new Promise(r => { timer = setTimeout(r, 10000); })
+    ]);
+    clearTimeout(timer);
   }
 }
 
@@ -233,8 +274,12 @@ class MemoryQueue {
     this.timers = new Set();
     this.seen = new Set();
     this.busy = new Set(); // partitions with a job running
+    this.processing = new Set();
     this.stopped = false;
   }
+
+  // Single process: no partition is shared with another instance
+  async whenIdle() {}
 
   async publish(subject, job, { id, partition } = {}) {
     if (id) {
@@ -260,11 +305,13 @@ class MemoryQueue {
       const [item] = this.items.splice(index, 1);
       this.running++;
       if (item.partition !== undefined) this.busy.add(item.partition);
-      this._process(item).finally(() => {
+      const processing = this._process(item).finally(() => {
         this.running--;
+        this.processing.delete(processing);
         if (item.partition !== undefined) this.busy.delete(item.partition);
         this._pump();
       });
+      this.processing.add(processing);
     }
   }
 
@@ -291,9 +338,12 @@ class MemoryQueue {
     return { pending: this.items.length, inFlight: this.running, retrying: this.timers.size };
   }
 
-  stop() {
+  async stop() {
     this.stopped = true;
     this.timers.forEach(clearTimeout);
+    let timer;
+    await Promise.race([Promise.allSettled([...this.processing]), new Promise(r => { timer = setTimeout(r, 10000); })]);
+    clearTimeout(timer);
   }
 }
 

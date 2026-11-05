@@ -164,3 +164,45 @@ spec:
       port: 1883
       targetPort: mqtt
 {{- end }}
+{{- if and .Values.redis.enabled .Values.redis.bundled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "udc.fullname" . }}-redis
+  labels: {{- include "udc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {{- include "udc.selector" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels: {{- include "udc.selector" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      containers:
+        - name: redis
+          image: {{ .Values.redis.image }}
+          # Sessions are short-lived: losing them on a restart only means logging in again
+          args: ["redis-server", "--save", "", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            tcpSocket: { port: redis }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "udc.fullname" . }}-redis
+  labels: {{- include "udc.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "udc.selector" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+{{- end }}

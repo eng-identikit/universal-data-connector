@@ -226,15 +226,15 @@ class DataConnectorEngine extends EventEmitter {
     try {
       logger.info('Reloading sources configuration...');
 
-      // Save new sources configuration if provided
+      // Save new sources configuration if provided (validated before it is written)
       if (newSources) {
-        configManager.sources = newSources;
-        await configManager.saveSourcesConfig();
+        await configManager.replaceSources(newSources);
         logger.info('New sources configuration saved');
+      } else {
+        // (Re)load from file: validates and applies defaults
+        await configManager.loadSourcesConfig();
+        logger.info('Sources configuration reloaded from file');
       }
-      // (Re)load from file: validates and applies defaults
-      await configManager.loadSourcesConfig();
-      logger.info('Sources configuration reloaded from file');
 
       // Get current enabled sources
       const enabledSources = configManager.getEnabledSources();
@@ -299,21 +299,15 @@ class DataConnectorEngine extends EventEmitter {
         throw new Error(`Connector '${connectorId}' not found`);
       }
 
-      const wasRunning = existingConnector.status === 'connected';
-
-      // Stop existing connector
-      if (wasRunning) {
-        await this.stopConnector(connectorId);
-      }
-
-      // Remove old connector
+      // Remove old connector (stops it if connected)
       await this.removeConnector(connectorId);
 
       // Create new connector with updated config
       await this.createConnector(newConfig);
 
-      // Start if it was running before
-      if (wasRunning) {
+      // Start it whenever the engine runs and the connector belongs to this instance,
+      // also if the old one was offline or reconnecting (the new config may fix it)
+      if (this.isRunning && this.canRun(connectorId)) {
         await this.startConnector(connectorId);
       }
 
@@ -675,105 +669,6 @@ class DataConnectorEngine extends EventEmitter {
     return results;
   }
 
-  async flushBuffer() {
-    if (!this.natsTransport || !this.natsTransport.isConnected()) return;
-
-    logger.info('Flushing buffered data to NATS...');
-
-    // Check if DataStore supports advanced queries or just basic memory array
-    // We need to find items with _transportSubject
-
-    // Basic implementation that works with the current DataStore facade
-    // We might need to iterate if it's external storage without explicit query support for this flag
-
-    if (this.dataStore.data && Array.isArray(this.dataStore.data)) {
-      // Memory / Simple implementation handling
-      const buffer = [...this.dataStore.data];
-      let flushedCount = 0;
-
-      // Iterate backwards (oldest first)
-      for (let i = buffer.length - 1; i >= 0; i--) {
-        const item = buffer[i];
-        if (item._transportSubject) {
-          try {
-            await this.natsTransport.publish(item._transportSubject, item);
-            flushedCount++;
-            // Remove from buffer (MemoryStore specific)
-            // If using external store like Redis/Timescale, we ideally "delete" it
-
-            // In-memory removal:
-            const index = this.dataStore.data.indexOf(item);
-            if (index > -1) {
-              this.dataStore.data.splice(index, 1);
-            }
-
-          } catch (e) {
-            logger.error('Failed to flush item:', e);
-          }
-        }
-      }
-      if (flushedCount > 0) logger.info(`Flushed ${flushedCount} items from memory buffer.`);
-      return;
-    }
-
-    // External storage handling (Timescale/Redis)
-    // We need a way to "get buffered items" and "delete them"
-    // Since we don't have explicit "getBuffered" method on adapters, we make a best effort via retrieve/search if possible
-    // Or we assume the user accepts the limitation that external storage buffering might require manual replay or advanced impl.
-    // BUT the user specifically asked for "recovery procedure".
-
-    // For Redis/Timescale as buffer:
-    // We will assume that if we are using them as "Safety Buffer" (not historical),
-    // we should fetch all and clear?
-    // User: "just recovery... push all un-sent data"
-
-    // If the storage policy is "buffer_on_fail", then EVERYTHING in the store is technically stuff that failed to send (if we only write on fail).
-    // So we can iterate and send.
-
-    const storagePolicy = process.env.STORAGE_POLICY || 'buffer_on_fail';
-
-    if (storagePolicy === 'buffer_on_fail') {
-      // In this mode, everything in DB is a failed message.
-      // We can fetch batches and send.
-
-      try {
-        // Get latest 100 (or more)
-        const items = await this.dataStore.getLatest(100);
-        if (items.length === 0) return;
-
-        logger.info(`Found ${items.length} items in persistent buffer. Attempting flush...`);
-        let count = 0;
-
-        // We need to reverse to send oldest first? getLatest returns newest first probably.
-        const itemsToSend = items.reverse();
-
-        for (const item of itemsToSend) {
-          const subject = item._transportSubject || this.determineSubject(item);
-          try {
-            await this.natsTransport.publish(subject, item);
-            count++;
-            // Delete is crucial here to avoid loops.
-            // DataStore doesn't have deleteById exposed in the simplified interface we saw?
-            // Let's check DataStore methods... it has 'clearBySource' or 'clear'.
-            // It does NOT have deleteById. This is a gap.
-            // For now, we will stick to 'flush means we successfully sent' and maybe we clear ALL if it's buffer-only mode?
-            // Clearing all might be risky if we only fetched 100.
-          } catch (e) {
-            logger.error('Failed to flush persistent item:', e);
-          }
-        }
-
-        if (count > 0) {
-          logger.info(`Flushed ${count} items. Clearing storage to prevent duplicates (Buffer Mode).`);
-          await this.dataStore.clear(); // Nuclear option for now given the API limits
-        }
-
-      } catch (err) {
-        logger.warn('Error during persistent buffer flush:', err);
-      }
-    }
-  }
-
   handleConnectorError(sourceId, error) {
     const connectorInfo = this.connectors.get(sourceId);
     if (connectorInfo) {
@@ -803,10 +698,15 @@ class DataConnectorEngine extends EventEmitter {
     }
   }
 
-  getConnectorStatus() {
+  /**
+   * Runtime status of every connector, or of one connector (null if unknown)
+   * @param {string} [sourceId]
+   */
+  getConnectorStatus(sourceId) {
     const status = {};
 
     for (const [connectorId, connectorInfo] of this.connectors.entries()) {
+      if (sourceId !== undefined && connectorId !== sourceId) continue;
       status[connectorId] = {
         status: connectorInfo.status,
         type: connectorInfo.config.type,
@@ -820,14 +720,14 @@ class DataConnectorEngine extends EventEmitter {
       };
     }
 
-    return status;
+    return sourceId !== undefined ? status[sourceId] || null : status;
   }
 
   getStatus() {
     const uptime = this.stats.startTime ? Date.now() - this.stats.startTime.getTime() : 0;
     return {
       isRunning: this.isRunning,
-      natsConnected: this.natsTransport ? this.natsTransport.isConnected() : false,
+      natsConnected: this.transports.nats ? this.transports.nats.isConnected() : false,
       uptime,
       connectors: this.getConnectorStatus(),
       stats: {
@@ -967,9 +867,11 @@ class DataConnectorEngine extends EventEmitter {
 
       await Promise.allSettled(stopPromises);
 
-      // Close NATS connection
-      if (this.natsTransport) {
-        await this.natsTransport.close();
+      // Close output transports
+      for (const transport of Object.values(this.transports)) {
+        if (transport && typeof transport.close === 'function') {
+          await transport.close().catch(error => logger.warn(`Failed to close transport: ${error.message}`));
+        }
       }
 
       // Close storage (flushes connections, stops retry timers)
@@ -1008,6 +910,9 @@ class DataConnectorEngine extends EventEmitter {
     if (!connectorInfo) {
       throw new Error(`Connector '${sourceId}' not found`);
     }
+    if (!this.canRun(sourceId)) {
+      throw new Error(`Connector '${sourceId}' runs on another cluster instance`);
+    }
 
     try {
       await connectorInfo.connector.start();
@@ -1027,6 +932,7 @@ class DataConnectorEngine extends EventEmitter {
 
     try {
       await connectorInfo.connector.stop();
+      this.updateConnectorStatus(sourceId, 'disconnected');
       logger.info(`Stopped connector '${sourceId}'`);
       return true;
     } catch (error) {
@@ -1047,11 +953,7 @@ class DataConnectorEngine extends EventEmitter {
   }
 
   exportMappedDataToJSON(options = {}) {
-    return this.mappingEngine.exportToJSON(options);
-  }
-
-  exportMappedDataToNGSILD(options = {}) {
-    return this.mappingEngine.exportToNGSILD(options);
+    return this.mappingEngine.exportData('json', options);
   }
 
   exportMappedDataToTOON(options = {}) {
@@ -1075,7 +977,8 @@ class DataConnectorEngine extends EventEmitter {
   }
 
   clearMappedData() {
-    this.mappingEngine.clearAll();
+    // Runtime data only: saved device mappings must survive (they are written back to mapping.json)
+    this.mappingEngine.clearData();
     logger.info('Mapped data cleared');
   }
 
@@ -1083,13 +986,12 @@ class DataConnectorEngine extends EventEmitter {
     logger.info('Reloading configuration...');
 
     try {
-      // Stop all connectors
-      if (this.isRunning) {
-        await this.stop();
-      }
+      const wasRunning = this.isRunning;
 
-      // Clear current connectors
-      this.connectors.clear();
+      // Stop and dispose the current connectors; transports and storage stay up
+      for (const connectorId of Array.from(this.connectors.keys())) {
+        await this.removeConnector(connectorId);
+      }
 
       // Reload config
       await configManager.reloadConfig();
@@ -1097,9 +999,13 @@ class DataConnectorEngine extends EventEmitter {
       // Reinitialize connectors
       await this.initializeConnectors();
 
-      // Restart if it was running
-      if (this.isRunning) {
-        await this.start();
+      // Restart the connectors this instance runs
+      if (wasRunning) {
+        for (const connectorInfo of this.connectors.values()) {
+          if (!this.canRun(connectorInfo.config.id)) continue;
+          await this.startConnector(connectorInfo.config.id)
+            .catch(error => logger.error(`Failed to start connector '${connectorInfo.config.id}': ${error.message}`));
+        }
       }
 
       logger.info('Configuration reloaded successfully');

@@ -3,7 +3,7 @@ const logger = require('../../utils/logger');
 const configManager = require('../../config/ConfigManager');
 
 /**
- * Keeps config/sources.json and config/mapping.json identical on every
+ * Keeps config/sources.json, config/mapping.json and config/transformers.json identical on every
  * instance of a cluster. PostgreSQL (system_config) holds the shared copy:
  *
  *   - at startup the database copy wins; an empty database is seeded from the files
@@ -12,8 +12,9 @@ const configManager = require('../../config/ConfigManager');
  *     are told (control message) to pull it and reload
  */
 class ConfigSync {
-  constructor({ pool, bus, instanceId }) {
+  constructor({ pool, bus, instanceId, transformers = null }) {
     this.pool = pool;
+    this.transformers = transformers;
     this.bus = bus;
     this.instanceId = instanceId;
     this.engine = null;
@@ -24,7 +25,8 @@ class ConfigSync {
   files() {
     return {
       sources: configManager.sourcesConfigFile,
-      mapping: this.engine.mappingEngine.mappingConfigPath
+      mapping: this.engine.mappingEngine.mappingConfigPath,
+      ...(this.transformers && { transformers: this.transformers.file })
     };
   }
 
@@ -124,6 +126,8 @@ class ConfigSync {
   async _reload(key) {
     if (key === 'sources') {
       await this.engine.reloadSourcesConfiguration();
+    } else if (key === 'transformers') {
+      this.transformers.load();
     } else if (key === 'mapping') {
       this.engine.mappingEngine.mappingConfigs.clear();
       await this.engine.mappingEngine.loadMappingConfig();

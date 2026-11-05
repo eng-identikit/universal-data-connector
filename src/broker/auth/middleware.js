@@ -5,22 +5,28 @@ const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
 
 /**
  * Resolves the caller from a bearer token or an API key:
- *   user:   { kind: 'user', user, isSuperadmin, memberships: Map<tenant, role>, tokenExp }
+ *   user:   { kind: 'user', user, isSuperadmin, memberships: Map<tenant, role>, tokenExp, sessionId }
  *   apikey: { kind: 'apikey', apiKey, tenant, role, allowedTypes }
- * Throws 401 when neither is valid.
+ * Throws 401 when neither is valid. A token is valid only while its session exists.
  */
-async function resolveCaller({ users, apiKeys }, { token, apiKey }) {
+async function resolveCaller({ users, apiKeys, sessions }, { token, apiKey }) {
   if (token) {
     const claims = verifyToken(token, 'access');
-    const user = claims && await users.findActive(claims.sub);
-    if (!user || user.token_version !== claims.tv) throw unauthorized('Invalid or expired token');
+    const [user, session] = claims && claims.sid
+      ? await Promise.all([users.findActive(claims.sub), sessions.get(claims.sid)])
+      : [null, null];
+    if (!user || user.token_version !== claims.tv || !session || session.userId !== user.id) {
+      throw unauthorized('Invalid or expired token');
+    }
+    sessions.touch(claims.sid);
     const memberships = await users.memberships(user.id);
     return {
       kind: 'user',
       user,
       isSuperadmin: user.is_superadmin,
       memberships: new Map(memberships.map(m => [m.tenant, m.role])),
-      tokenExp: claims.exp
+      tokenExp: claims.exp,
+      sessionId: claims.sid
     };
   }
   if (apiKey) {

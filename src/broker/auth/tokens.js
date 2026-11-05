@@ -12,12 +12,18 @@ if (!secret) {
   logger.warn('BROKER_JWT_SECRET not set: using a random secret. Tokens will not survive a restart and will not work across instances.');
 }
 
-function issueTokens(user) {
-  const claims = { sub: user.id, tv: user.token_version };
+/** Tokens of a session: both carry its id (sid); the refresh token also its current jti. */
+function issueTokens(user, session) {
+  const claims = { sub: user.id, tv: user.token_version, sid: session.id };
   return {
     accessToken: jwt.sign({ ...claims, typ: 'access' }, secret, { issuer: ISSUER, expiresIn: ACCESS_TTL }),
-    refreshToken: jwt.sign({ ...claims, typ: 'refresh' }, secret, { issuer: ISSUER, expiresIn: REFRESH_TTL })
+    refreshToken: jwt.sign({ ...claims, typ: 'refresh' }, secret, { issuer: ISSUER, expiresIn: REFRESH_TTL, jwtid: session.jti })
   };
+}
+
+/** When a refresh token issued now would expire: the session lifetime. */
+function refreshExpiry() {
+  return new Date(jwt.decode(jwt.sign({}, secret, { expiresIn: REFRESH_TTL })).exp * 1000);
 }
 
 /** Returns the decoded claims, or null if the token is invalid, expired or of another type. */
@@ -42,4 +48,4 @@ function hashApiKey(key) {
   return crypto.createHash('sha256').update(key).digest('hex');
 }
 
-module.exports = { issueTokens, verifyToken, generateApiKey, hashApiKey };
+module.exports = { issueTokens, refreshExpiry, verifyToken, generateApiKey, hashApiKey };

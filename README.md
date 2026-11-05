@@ -176,9 +176,9 @@ Mapped data is saved to the storage configured in `config/storage.json`: **Memor
 
 - **Fallback**: if the storage is not reachable at startup, the server starts anyway and keeps the data in memory. It retries the connection every 30 s (`STORAGE_RETRY_INTERVAL`) and moves the buffered data to the storage once it is back.
 - **Hot switch**: the storage can be changed at runtime (`POST /api/config/storage/configure`). The new storage is connected before the old one is replaced, so a failed switch leaves the current one running.
-- **History API**: `/api/history/*` reads the data recorded in TimescaleDB, downsampled with `time_bucket` (avg/min/max/last per bucket). It works even when the engine is currently writing to another storage.
+- **History**: the attribute history of the entities is kept by the broker in TimescaleDB (`GET /api/v1/entities/:id/history/...`, see the [broker guide](./docs/Broker.md)).
 
-Details: [Storage Guide](./docs/Storage.md), [History endpoints](./docs/API.md#history-endpoints-timescaledb).
+Details: [Storage Guide](./docs/Storage.md).
 
 ### 6. **Real-time Stream (WebSocket)**
 
@@ -200,12 +200,11 @@ universal-data-connector/
 │   ├── sources.json          # Data source configuration
 │   └── storage.json          # Storage configuration (optional)
 ├── src/
-│   ├── server.js             # REST API (port 3000) + WebSocket (port 3001)
-│   ├── api/routes/           # REST routes (status, sources, data, history, config, ...)
+│   ├── server.js             # REST API and WebSocket stream (port 3000)
+│   ├── api/routes/           # System routes (status, sources, data, config, mapping)
 │   ├── connectors/protocols/ # One connector per protocol (OPC UA, Modbus, PROFINET, EtherCAT, ...)
 │   ├── storage/
-│   │   ├── StorageFactory.js     # Memory, Redis, TimescaleDB adapters
-│   │   └── TimescaleHistory.js   # History queries (time_bucket downsampling)
+│   │   └── StorageFactory.js     # Memory, Redis, TimescaleDB adapters
 │   ├── mappingTools/
 │   │   ├── MappingEngine.js      # Mapping and discovery management
 │   │   ├── UniversalDataModel.js # Unified data model

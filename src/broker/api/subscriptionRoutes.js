@@ -114,17 +114,21 @@ module.exports = function subscriptionRoutes({ services, tenantRole, engine, wor
   router.post('/subscriptions/:id/dlq/replay', write, asyncHandler(async (req, res) => {
     const ids = req.body?.ids;
     if (ids !== undefined && !Array.isArray(ids)) throw badRequest('ids must be an array');
-    const notifications = await subs.takeDead(req.ctx.tenant, req.params.id, ids);
-    for (const n of notifications) {
+    const entries = await subs.peekDead(req.ctx.tenant, req.params.id, ids);
+    // Each entry leaves the DLQ only once it is back on the queue: a failure keeps the rest
+    let replayed = 0;
+    for (const { id, notification: n } of entries) {
       const replay = { ...n, id: crypto.randomUUID(), replayOf: n.id };
       await engine.queue.publish(`udc.notify.${req.ctx.tenant.replace(/[.\s*>]/g, '_')}.${req.params.id}`, replay, { id: replay.id });
+      await subs.removeDead(req.ctx.tenant, req.params.id, [id]);
+      replayed++;
     }
-    res.json({ replayed: notifications.length });
+    res.json({ replayed });
   }));
 
   router.delete('/subscriptions/:id/dlq', write, asyncHandler(async (req, res) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : undefined;
-    res.json({ purged: (await subs.takeDead(req.ctx.tenant, req.params.id, ids)).length });
+    res.json({ purged: await subs.removeDead(req.ctx.tenant, req.params.id, ids) });
   }));
 
   return router;

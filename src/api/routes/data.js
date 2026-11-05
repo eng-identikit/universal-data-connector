@@ -1,11 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../../utils/logger');
+const { parseLimit, timeRangeError } = require('../params');
+
+const badRequest = (res, message) => res.status(400).json({ error: 'Bad Request', message });
 
 // Get latest data points
 router.get('/latest', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = parseLimit(req.query.limit);
     const sourceId = req.query.source;
     
     const connector = global.connector;
@@ -46,9 +49,11 @@ router.get('/latest', async (req, res) => {
 router.get('/source/:sourceId', async (req, res) => {
   try {
     const sourceId = req.params.sourceId;
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = parseLimit(req.query.limit);
     const startTime = req.query.startTime;
     const endTime = req.query.endTime;
+    const rangeError = timeRangeError(startTime, endTime);
+    if (rangeError) return badRequest(res, rangeError);
     
     const connector = global.connector;
     const engine = connector?.getEngine();
@@ -89,9 +94,9 @@ router.get('/source/:sourceId', async (req, res) => {
 router.get('/search', async (req, res) => {
   try {
     const query = req.query.q;
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = parseLimit(req.query.limit);
     
-    if (!query) {
+    if (!query || typeof query !== 'string') {
       return res.status(400).json({
         error: 'Bad Request',
         message: 'Search query (q) parameter is required'
@@ -142,6 +147,8 @@ router.get('/range', async (req, res) => {
         message: 'Both startTime and endTime parameters are required'
       });
     }
+    const rangeError = timeRangeError(startTime, endTime);
+    if (rangeError) return badRequest(res, rangeError);
 
     const connector = global.connector;
     const engine = connector?.getEngine();
@@ -184,7 +191,12 @@ router.get('/export', async (req, res) => {
     const sourceId = req.query.source;
     const startTime = req.query.startTime;
     const endTime = req.query.endTime;
-    const limit = parseInt(req.query.limit) || 10000;
+    const limit = parseLimit(req.query.limit, 10000, 100000);
+    if (!['json', 'csv'].includes(String(format).toLowerCase())) {
+      return badRequest(res, `Unsupported export format: ${format}`);
+    }
+    const rangeError = timeRangeError(startTime, endTime);
+    if (rangeError) return badRequest(res, rangeError);
     
     const connector = global.connector;
     const engine = connector?.getEngine();
@@ -284,7 +296,7 @@ router.get('/export', async (req, res) => {
 });
 
 // Get data statistics
-router.get('/stats', (req, res) => {
+router.get('/stats', async (req, res) => {
   try {
     const connector = global.connector;
     const engine = connector?.getEngine();
@@ -296,7 +308,7 @@ router.get('/stats', (req, res) => {
       });
     }
 
-    const stats = engine.dataStore.getStats();
+    const stats = await engine.dataStore.getAllStats();
     
     res.json({
       timestamp: new Date().toISOString(),
@@ -313,7 +325,7 @@ router.get('/stats', (req, res) => {
 });
 
 // Clear data
-router.delete('/clear', (req, res) => {
+router.delete('/clear', async (req, res) => {
   try {
     const sourceId = req.query.source;
     
@@ -327,11 +339,18 @@ router.delete('/clear', (req, res) => {
       });
     }
 
+    const storage = engine.dataStore.getStorageInfo();
     let clearedCount;
     if (sourceId) {
+      if (storage.type !== 'memory') {
+        return res.status(501).json({
+          error: 'Not Implemented',
+          message: `Clearing a single source is not supported by the ${storage.type} storage`
+        });
+      }
       clearedCount = engine.dataStore.clearBySource(sourceId);
     } else {
-      clearedCount = engine.dataStore.clear();
+      clearedCount = await engine.dataStore.clearAll();
     }
     
     logger.info(`Cleared ${clearedCount} data points via API${sourceId ? ` for source '${sourceId}'` : ''}`);

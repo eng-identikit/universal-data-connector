@@ -1,5 +1,11 @@
 const logger = require('../../utils/logger');
-const { badRequest, notFound } = require('../errors');
+const configManager = require('../../config/ConfigManager');
+const { parseIntParam } = require('../services/EntityService');
+const { badRequest, forbidden, notFound } = require('../errors');
+
+const STATUSES = ['pending', 'sent', 'succeeded', 'failed'];
+// Tenant that receives a source's devices: only that tenant may command it
+const sourceTenant = (config) => (config && config.tenant) || 'default';
 
 const COMMAND_TIMEOUT_MS = parseInt(process.env.BROKER_COMMAND_TIMEOUT_MS || '10000', 10);
 const SUBJECT_PREFIX = 'udc.cmd';
@@ -56,10 +62,13 @@ class CommandService {
    */
   async create(ctx, entityId, attrName, value, { createdBy, waitMs = 5000 } = {}) {
     const entity = await this.entities.get(ctx, entityId);
-    const attr = entity.attrs[attrName];
+    const attr = Object.hasOwn(entity.attrs, attrName) ? entity.attrs[attrName] : null;
     if (!attr) throw notFound(`Attribute '${attrName}' not found on entity '${entityId}'`);
     if (!attr.writable) throw badRequest(`Attribute '${attrName}' is not writable`);
     const target = validateTarget(attr.command);
+    // In a cluster every instance knows every connector's config (it runs on one of them)
+    const source = this.engine?.connectors.get(target.connector)?.config || configManager.getSourceById(target.connector);
+    if (source && sourceTenant(source) !== ctx.tenant) throw forbidden(`Connector '${target.connector}' belongs to another tenant`);
 
     const { rows } = await this.pool.query(
       `INSERT INTO commands (tenant, entity_id, attr, value, connector, target, created_by)
@@ -67,16 +76,16 @@ class CommandService {
       [ctx.tenant, entityId, attrName, JSON.stringify(value ?? null), target.connector, target, createdBy || null]
     );
     const command = toCommand(rows[0]);
-    const done = this._dispatch(command, target, value);
+    const done = this._dispatch(command, target, value, ctx.tenant);
     const finished = await Promise.race([done, new Promise(r => setTimeout(() => r(null), Math.min(waitMs, COMMAND_TIMEOUT_MS + 1000)))]);
     return finished || { ...command, status: 'sent' };
   }
 
-  async _dispatch(command, target, value) {
+  async _dispatch(command, target, value, tenant) {
     await this._setStatus(command.id, 'sent');
     let error = null;
     try {
-      const request = { connector: target.connector, method: target.method, args: target.args, value };
+      const request = { connector: target.connector, method: target.method, args: target.args, value, tenant };
       if (this.nats.connected) {
         let reply;
         try {
@@ -102,9 +111,11 @@ class CommandService {
     return typeof this.engine.isConnectorActive === 'function' ? this.engine.isConnectorActive(id) : this.engine.connectors.has(id);
   }
 
-  async _executeLocal({ connector: id, method, args, value }) {
-    const connector = this.engine.connectors.get(id)?.connector;
+  async _executeLocal({ connector: id, method, args, value, tenant }) {
+    const entry = this.engine.connectors.get(id);
+    const connector = entry?.connector;
     if (!connector) throw new Error(`Connector '${id}' is not running`);
+    if (sourceTenant(entry.config) !== tenant) throw new Error(`Connector '${id}' belongs to another tenant`);
     if (typeof connector[method] !== 'function') throw new Error(`Connector '${id}' has no method '${method}'`);
     const resolved = (args || ['$value']).map(a => (a === '$value' ? value : a));
     await connector[method](...resolved);
@@ -124,8 +135,12 @@ class CommandService {
     const params = [ctx.tenant];
     const where = ['tenant = $1'];
     if (entityId) { params.push(entityId); where.push(`entity_id = $${params.length}`); }
-    if (status) { params.push(status); where.push(`status = $${params.length}`); }
-    params.push(Math.min(Number(limit) || 100, 1000));
+    if (status) {
+      if (!STATUSES.includes(status)) throw badRequest(`status must be one of ${STATUSES.join(', ')}`);
+      params.push(status);
+      where.push(`status = ${params.length}`);
+    }
+    params.push(parseIntParam(limit, 100, 1, 1000, 'limit'));
     const { rows } = await this.pool.query(
       `SELECT * FROM commands WHERE ${where.join(' AND ')} ORDER BY created_at DESC LIMIT $${params.length}`, params
     );

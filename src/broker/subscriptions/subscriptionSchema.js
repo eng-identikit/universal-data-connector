@@ -1,13 +1,22 @@
 const Joi = require('joi');
 const { compile, ExpressionError } = require('../expr/expression');
 const { badRequest } = require('../errors');
+const transformer = require('../transform/transformer');
+
+// Library lookup (TransformerService), registered by the broker
+let lookupTransformer = null;
+const setTransformerLookup = (fn) => { lookupTransformer = fn; };
 
 const ENTITY_TYPE = Joi.string().pattern(/^[A-Za-z][A-Za-z0-9_]{0,63}$/);
 const ENTITY_ID = Joi.string().pattern(/^[A-Za-z0-9_\-:.]{1,256}$/);
 const ATTR_NAME = Joi.string().pattern(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/);
 // {tenant} {subscription} {entityId} {entityType} are expanded per message
 const TOPIC = Joi.string().max(512).pattern(/^[^\s#+]*(\{[a-zA-Z]+\}[^\s#+]*)*$/);
-const SUBJECT = Joi.string().max(512).pattern(/^[A-Za-z0-9_\-.{}>*]+$/);
+// Publish subjects: no wildcards, and never the broker's own 'udc.' subjects (queues, control)
+const SUBJECT = Joi.string().max(512)
+  .pattern(/^[A-Za-z0-9_\-.{}]+$/)
+  .pattern(/^udc\./i, { invert: true })
+  .messages({ 'string.pattern.invert.base': "notify.subject must not start with 'udc.' (reserved by the broker)" });
 
 const selector = Joi.object({
   types: Joi.array().items(ENTITY_TYPE).max(50).default([]),
@@ -33,7 +42,12 @@ const trigger = Joi.object({
 const common = {
   attrs: Joi.array().items(ATTR_NAME).max(100).unique().default([]),
   format: Joi.string().valid('full', 'values').default('full'),
-  perEntity: Joi.boolean().default(false)
+  perEntity: Joi.boolean().default(false),
+  // Output transformer: a library one by id, or an inline JSONata expression
+  transformer: Joi.string().pattern(/^[a-z0-9][a-z0-9_-]{0,63}$/).allow(null, ''),
+  transform: Joi.object({
+    expression: Joi.string().max(transformer.MAX_EXPRESSION_LENGTH).required()
+  }).allow(null)
 };
 
 const notify = Joi.alternatives().conditional('.channel', {
@@ -123,7 +137,19 @@ function validate(schema, input) {
   if (value.notify?.channel === 'http' && /[\r\n]/.test(Object.values(value.notify.headers || {}).join(''))) {
     throw badRequest('notify.headers must not contain line breaks');
   }
-  const { channel, url } = value.notify || {};
+  const n = value.notify || {};
+  if (n.transformer && n.transform) throw badRequest('Use either notify.transformer or notify.transform, not both');
+  if (n.transform) {
+    try {
+      transformer.compile(n.transform.expression);
+    } catch (e) {
+      throw badRequest(`notify.transform: ${e.message}`, { field: 'notify.transform.expression', ...e.details });
+    }
+  }
+  if (n.transformer && lookupTransformer && !lookupTransformer(n.transformer)) {
+    throw badRequest(`Transformer '${n.transformer}' not found`, { field: 'notify.transformer' });
+  }
+  const { channel, url } = n;
   if ((channel === 'mqtt' || channel === 'nats') && !url && !defaultBrokers()[channel]) {
     throw badRequest(`notify.url is required: no default ${channel.toUpperCase()} broker is configured`, { field: 'notify.url' });
   }
@@ -142,4 +168,4 @@ const validateCreate = (input) => validate(createSchema, input);
 /** Full body after merging a patch over the stored subscription (validated as a whole). */
 const validateMerged = (input) => validate(createSchema, input);
 
-module.exports = { validateCreate, validateMerged, defaultBrokers };
+module.exports = { validateCreate, validateMerged, defaultBrokers, setTransformerLookup };

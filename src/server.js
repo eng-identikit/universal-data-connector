@@ -21,6 +21,9 @@ const Broker = require('./broker/Broker');
 class UniversalDataConnector {
   constructor(storageConfig = null) {
     this.app = express();
+    // Client address from X-Forwarded-For when the request comes through a proxy on a
+    // private network (the UI's nginx, an ingress); used by the login limiter and the access log
+    this.app.set('trust proxy', process.env.BROKER_TRUST_PROXY || 'loopback, linklocal, uniquelocal');
     this.server = null;
     this.engine = null;
     this.port = process.env.PORT || 3000;

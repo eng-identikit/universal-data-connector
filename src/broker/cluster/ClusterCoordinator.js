@@ -15,10 +15,11 @@ const PARTITIONS = 32;
  *   sub:<0..31>        subscription partitions (hash of the subscription id):
  *                      the owner evaluates changes, throttles and periodic sends
  *   connector:<id>     each connector runs on exactly one instance
+ *   ingest:<0..15>     ingest queue partitions, applied by one instance at a time
  *
  * A crashed instance stops renewing; its leases expire and are taken over
- * within ~LEASE_MS. Delivery and ingest queues need no lease (shared
- * JetStream consumers), and the realtime stream runs everywhere.
+ * within ~LEASE_MS. The delivery queue needs no lease (shared JetStream
+ * consumer), and the realtime stream runs everywhere.
  */
 class ClusterCoordinator {
   constructor({ pool, instanceId, engine, metrics = () => ({}), ingestPartitions = 0 }) {
@@ -59,7 +60,9 @@ class ClusterCoordinator {
     engine.setConnectorGate((id) => this.ownsConnector(id));
   }
 
-  async start() {
+  /** ingestQueue: lets a released ingest partition finish its batch before the lease goes. */
+  async start({ ingestQueue = null } = {}) {
+    this.ingestQueue = ingestQueue;
     // Partition cached on the compiled subscription: owns() runs for every change
     this.engine.owns = (sub) => {
       if (sub.partition === undefined) sub.partition = partitionOf(sub.id);
@@ -177,6 +180,12 @@ class ClusterCoordinator {
         // Expire now so another instance can take them, but keep evaluating until it does
         await this.pool.query('UPDATE cluster_leases SET expires_at = now() WHERE owner = $1 AND resource = ANY($2)', [this.id, names]);
         extra.forEach(p => this.draining.set(p, Date.now() + LEASE_MS));
+      } else if (prefix === 'ingest:') {
+        // Stop fetching first and let the batch in progress finish: the next owner
+        // must never apply the same partition concurrently (order of updates)
+        extra.forEach(p => owned.delete(p));
+        if (this.ingestQueue) await Promise.all(extra.map(p => this.ingestQueue.whenIdle(p, LEASE_MS / 3)));
+        await this.pool.query('DELETE FROM cluster_leases WHERE owner = $1 AND resource = ANY($2)', [this.id, names]);
       } else {
         // Connectors must never run twice (one connection per device): hand over directly
         await this.pool.query('DELETE FROM cluster_leases WHERE owner = $1 AND resource = ANY($2)', [this.id, names]);

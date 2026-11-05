@@ -1,7 +1,8 @@
 # UDC Broker stack: PostgreSQL (TimescaleDB + PostGIS), backend, UI and two optional services:
 #   nats  NATS JetStream: durable notification/ingest queues, clustering, NATS channel
 #   mqtt  Mosquitto: default broker for MQTT notification channels and MQTT connectors
-# Pick them with COMPOSE_PROFILES in .env (e.g. COMPOSE_PROFILES=nats,mqtt or empty), then:
+#   redis Redis: login sessions (JWT) and login attempt limits shared by all instances
+# Pick them with COMPOSE_PROFILES in .env (e.g. COMPOSE_PROFILES=nats,mqtt,redis or empty), then:
 #   docker compose up -d --build
 # UI: http://localhost:8080   API: http://localhost:3000/api/v1
 # Credentials and secrets come from .env (see .env.example).
@@ -44,6 +45,17 @@ services:
       - "1883:1883"
     restart: unless-stopped
 
+  # Login sessions behind the JWTs; without it they are kept in PostgreSQL
+  redis:
+    profiles: [redis]
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
   udc:
     build: .
     depends_on:
@@ -53,6 +65,9 @@ services:
         condition: service_started
         required: false
       mqtt:
+        condition: service_started
+        required: false
+      redis:
         condition: service_started
         required: false
     environment:
@@ -68,6 +83,7 @@ services:
       # mqtt://mqtt:1883) or to external ones.
       NATS_URL: ${COMPOSE_NATS_URL:-}
       BROKER_MQTT_URL: ${COMPOSE_MQTT_URL:-}
+      BROKER_REDIS_URL: ${COMPOSE_REDIS_URL:-}
       # Raw connector data buffer; entity history is stored by the broker in TimescaleDB
       UDC_RAW_STORAGE: ${UDC_RAW_STORAGE:-memory}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -89,4 +105,5 @@ services:
 volumes:
   db-data:
   nats-data:
+  redis-data:
   udc-logs:
