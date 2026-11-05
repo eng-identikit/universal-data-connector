@@ -17,7 +17,7 @@ L'UDC è anche un **context broker** standalone:
 
 ```bash
 cp .env.example .env          # imposta BROKER_JWT_SECRET e BROKER_ADMIN_PASSWORD
-docker compose up -d --build  # UI su http://localhost:8080, API su /api/v1
+docker compose up -d --build  # UI orchestratore su http://localhost:8080, API UDC su http://localhost:3000/api/v1
 ```
 
 Guida completa: [Context broker](./docs/Broker.it.md) (architettura, API, subscription, cluster, Helm, configurazione, prestazioni).

@@ -38,5 +38,5 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* Value of an existing secret key, so generated secrets survive upgrades */}}
 {{- define "udc.secretValue" -}}
 {{- $existing := lookup "v1" "Secret" .ctx.Release.Namespace (printf "%s-secrets" (include "udc.fullname" .ctx)) -}}
-{{- if .value -}}{{ .value }}{{- else if and $existing (index $existing.data .key) -}}{{ index $existing.data .key | b64dec }}{{- else -}}{{ randAlphaNum 32 }}{{- end -}}
+{{- if .value -}}{{ .value }}{{- else if and $existing (index $existing.data .key) -}}{{ index $existing.data .key | b64dec }}{{- else -}}{{ .prefix | default "" }}{{ randAlphaNum 40 }}{{- end -}}
 {{- end -}}

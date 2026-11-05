@@ -116,7 +116,7 @@ services:
       # The UDC of this stack, registered on the first start
       UDC_DEFAULT_NAME: ${UDC_DEFAULT_NAME:-UDC}
       UDC_DEFAULT_URL: http://udc:3000
-      UDC_DEFAULT_PUBLIC_URL: ${UDC_PUBLIC_URL:-}
+      UDC_DEFAULT_PUBLIC_URL: ${UDC_PUBLIC_URL:-http://localhost:3000}
       UDC_DEFAULT_KEY: ${BROKER_SERVICE_KEY:-}
       KEYCLOAK_URL: ${KEYCLOAK_URL:-}
       KEYCLOAK_REALM: ${KEYCLOAK_REALM:-}
@@ -127,10 +127,11 @@ services:
       - "${UI_API_PORT:-9000}:9000"
     restart: unless-stopped
 
+  # Orchestrator UI: talks only to ui-api (nginx proxies /api to it)
   ui:
     build: ../universal-data-connector-ui
     depends_on:
-      - udc
+      - ui-api
     ports:
       - "${UI_PORT:-8080}:80"
     restart: unless-stopped

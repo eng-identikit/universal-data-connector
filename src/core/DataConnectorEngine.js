@@ -896,6 +896,14 @@ class DataConnectorEngine extends EventEmitter {
     this.connectorGate = gate;
   }
 
+  /**
+   * Cluster view (the coordinator): state of connectors running on other
+   * instances and forwarding of start/stop/restart to them.
+   */
+  setClusterView(view) {
+    this.clusterView = view;
+  }
+
   canRun(sourceId) {
     return !this.connectorGate || this.connectorGate(sourceId);
   }

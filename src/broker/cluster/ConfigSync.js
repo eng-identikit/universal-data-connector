@@ -74,14 +74,21 @@ class ConfigSync {
   /** Express middleware for /api/v1/system: pushes the affected file after a successful change. */
   middleware() {
     return (req, res, next) => {
+      const keys = [];
       if (req.method !== 'GET') {
-        res.on('finish', () => {
-          if (res.statusCode >= 400 || !this.initialized) return;
-          const keys = [];
-          if (/^\/(config\/)?sources/.test(req.path)) keys.push('sources');
-          if (/^\/mapping/.test(req.path)) keys.push('mapping');
-          keys.forEach(key => this.push(key).catch(e => logger.error(`Config sync (${key}): ${e.message}`)));
-        });
+        if (/^\/(config\/)?sources/.test(req.path)) keys.push('sources');
+        if (/^\/mapping/.test(req.path)) keys.push('mapping');
+      }
+      if (keys.length) {
+        // Shared before the answer goes out: once the caller has it, the other
+        // instances have been told (they reload in the background)
+        const end = res.end.bind(res);
+        res.end = (...args) => {
+          if (res.statusCode >= 400 || !this.initialized) return end(...args);
+          Promise.all(keys.map(key => this.push(key).catch(e => logger.error(`Config sync (${key}): ${e.message}`))))
+            .finally(() => end(...args));
+          return res;
+        };
       }
       next();
     };

@@ -67,9 +67,11 @@ HTTP and WebSocket subscriptions need neither. A subscription that relies on a d
 | Cluster with Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 replicas; `UDC_REPLICAS` changes the count) |
 | Kubernetes | `helm install udc deploy/helm/udc` (see `values.yaml`: database and NATS bundled or external, NATS and MQTT optional) |
 
-The stack also starts **universal-data-connector-ui-api** on `:9000`, the backend of the orchestrator UI: it registers this UDC with `BROKER_SERVICE_KEY` (see its README).
+The stack also starts:
+- **universal-data-connector-ui-api** on `:9000`, the backend of the orchestrator UI. It registers this UDC with `BROKER_SERVICE_KEY` (see its README).
+- **The orchestrator UI** at **http://localhost:8080**. It is a board with the UDC instances and their sources and sinks; nginx forwards `/api` to ui-api. Log in with `UI_ADMIN_USER` / `UI_ADMIN_PASSWORD`.
 
-The UI is at **http://localhost:8080**: nginx forwards `/api` and the WebSocket stream to the backend. In single-instance mode the API is also on `:3000`. The first start creates the `default` tenant and the superadmin `BROKER_ADMIN_USER`; if `BROKER_ADMIN_PASSWORD` is missing, a password is generated and logged once.
+The UDC API (devices, scripts, MCP clients) is at **http://localhost:3000**. In cluster mode the `udc-gateway` publishes it and balances the replicas. The first start creates the `default` tenant and the superadmin `BROKER_ADMIN_USER`; if `BROKER_ADMIN_PASSWORD` is missing, a password is generated and logged once.
 
 ## Entity model
 
@@ -375,6 +377,10 @@ With `BROKER_CLUSTER=true` (and NATS), several instances share the work through 
 
 **Connector configuration**
 - `sources.json` and `mapping.json` are shared through the database (`system_config`). Every change made through `/system`, and every auto-discovery save, propagates to the other instances. `BROKER_CONFIG_SYNC=false` turns this off.
+- A change is shared before the answer. The other instances apply it right after, usually within a few hundred milliseconds.
+- Any instance answers for every connector:
+  - `GET /system/sources` reports each connector's state as the instance running it saw it at its last heartbeat, and names that instance in `runtime.instance`;
+  - start, stop and restart of a connector running elsewhere are forwarded to that instance, with a `202` answer and `status: "forwarded"`.
 
 **Monitoring**
 - Administration → Cluster shows instances, partitions, connectors, event-loop delay (above 200 ms an instance is saturated), ingest apply time and queue backlogs.

@@ -108,6 +108,7 @@ class Broker {
       if (this.nats.enabled) {
         this.cluster = new ClusterCoordinator({
           pool: this.pool,
+          bus: this.bus,
           instanceId: this.instanceId,
           engine: this.engine,
           metrics: () => this.metrics(),

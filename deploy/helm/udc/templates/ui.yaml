@@ -20,9 +20,9 @@ spec:
           image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
           imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
           env:
-            # nginx proxies /api and the WebSocket stream to the backend service
-            - name: UDC_BACKEND
-              value: "{{ include "udc.fullname" . }}-backend:{{ .Values.service.backendPort }}"
+            # nginx proxies /api (and the instances' streams) to the orchestrator API
+            - name: UI_API_BACKEND
+              value: "{{ include "udc.fullname" . }}-ui-api:{{ .Values.service.uiApiPort }}"
           ports:
             - name: http
               containerPort: 80
@@ -52,7 +52,7 @@ metadata:
   name: {{ include "udc.fullname" . }}
   labels: {{- include "udc.labels" . | nindent 4 }}
   annotations:
-    # Long-lived WebSocket connections on /api/v1/stream
+    # Long-lived WebSocket connections (realtime streams)
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     {{- with .Values.ingress.annotations }}
@@ -66,21 +66,26 @@ spec:
   tls: {{- toYaml . | nindent 4 }}
   {{- end }}
   rules:
+    # host: the orchestrator UI (which proxies /api to ui-api); without the UI, the UDC API
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          - path: /api
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "udc.fullname" . }}-{{ if .Values.ui.enabled }}ui{{ else }}backend{{ end }}
+                port: { number: {{ if .Values.ui.enabled }}{{ .Values.service.uiPort }}{{ else }}{{ .Values.service.backendPort }}{{ end }} }
+    {{- if and .Values.ui.enabled .Values.ingress.apiHost }}
+    # apiHost: the UDC API for devices, scripts and MCP clients
+    - host: {{ .Values.ingress.apiHost | quote }}
+      http:
+        paths:
+          - path: /
             pathType: Prefix
             backend:
               service:
                 name: {{ include "udc.fullname" . }}-backend
                 port: { number: {{ .Values.service.backendPort }} }
-          {{- if .Values.ui.enabled }}
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ include "udc.fullname" . }}-ui
-                port: { number: {{ .Values.service.uiPort }} }
-          {{- end }}
+    {{- end }}
 {{- end }}

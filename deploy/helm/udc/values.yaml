@@ -36,16 +36,46 @@ ui:
     requests: { cpu: 50m, memory: 32Mi }
     limits: { memory: 128Mi }
 
+# Orchestrator API (universal-data-connector-ui-api), deployed with the UI
+uiApi:
+  image:
+    repository: udc/ui-api
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  # Its own database on the same PostgreSQL (created on first start)
+  dbName: udc_ui
+  adminUser: admin
+  # Generated when empty (kept on upgrades)
+  adminPassword: ""
+  jwtSecret: ""
+  encryptionKey: ""
+  # Address external clients use for this UDC (MCP); defaults to https://<ingress.apiHost>
+  udcPublicUrl: ""
+  keycloak:
+    url: ""
+    realm: ""
+    clientId: ""
+    uiClientId: ""
+    authorizedRole: ""
+  resources:
+    requests: { cpu: 50m, memory: 96Mi }
+    limits: { memory: 256Mi }
+
 service:
   type: ClusterIP
   backendPort: 3000
   uiPort: 80
+  uiApiPort: 9000
 
 ingress:
   enabled: false
   className: ""
   annotations: {}
+  # The UI (orchestrator)
   host: udc.example.local
+  # The UDC API for devices, scripts and MCP clients (optional)
+  apiHost: ""
   tls: []
   #  - secretName: udc-tls
   #    hosts: [udc.example.local]
@@ -55,7 +85,10 @@ auth:
   # Leave empty to generate on first install (kept on upgrades); or use existingSecret
   adminPassword: ""
   jwtSecret: ""
-  # Secret with keys: jwt-secret, admin-password, db-password
+  # Service key of the orchestrator on this UDC (udc_ + 20 or more characters); generated when empty
+  serviceKey: ""
+  # Secret with keys: jwt-secret, admin-password, db-password, service-key,
+  # ui-jwt-secret, ui-encryption-key, ui-admin-password
   existingSecret: ""
 
 database:

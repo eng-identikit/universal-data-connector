@@ -1,4 +1,4 @@
-# Cluster mode: several backend replicas behind the UI's nginx.
+# Cluster mode: several backend replicas behind a gateway nginx on :3000.
 #   docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build
 # Needs NATS (COMPOSE_PROFILES=nats and COMPOSE_NATS_URL in .env).
 # Replicas share PostgreSQL and NATS; connectors and subscriptions are
@@ -6,9 +6,20 @@
 
 services:
   udc:
-    # No fixed host port with several replicas: reach the API through the UI on :8080
+    # No fixed host port with several replicas: the gateway below publishes :3000
     ports: !reset []
     deploy:
       replicas: ${UDC_REPLICAS:-3}
     environment:
       BROKER_CLUSTER: "true"
+
+  # The UDC API (devices, MCP clients, scripts) on :3000, balanced across the replicas
+  udc-gateway:
+    image: nginx:1.27-alpine
+    depends_on:
+      - udc
+    volumes:
+      - ./deploy/compose/udc-gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "3000:80"
+    restart: unless-stopped

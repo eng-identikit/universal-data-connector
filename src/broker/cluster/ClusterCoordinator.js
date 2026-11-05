@@ -17,13 +17,18 @@ const PARTITIONS = 32;
  *   connector:<id>     each connector runs on exactly one instance
  *   ingest:<0..15>     ingest queue partitions, applied by one instance at a time
  *
+ * Each heartbeat carries the state of the connectors the instance runs, so any
+ * instance can report every connector; start/stop/restart reach the owner
+ * through a control message.
+ *
  * A crashed instance stops renewing; its leases expire and are taken over
  * within ~LEASE_MS. The delivery queue needs no lease (shared JetStream
  * consumer), and the realtime stream runs everywhere.
  */
 class ClusterCoordinator {
-  constructor({ pool, instanceId, engine, metrics = () => ({}), ingestPartitions = 0 }) {
+  constructor({ pool, bus = null, instanceId, engine, metrics = () => ({}), ingestPartitions = 0 }) {
     this.pool = pool;
+    this.bus = bus;
     this.id = instanceId;
     this.engine = engine; // SubscriptionEngine
     this.metrics = metrics;
@@ -58,6 +63,55 @@ class ClusterCoordinator {
   attachConnectorEngine(engine) {
     this.connectorEngine = engine;
     engine.setConnectorGate((id) => this.ownsConnector(id));
+    engine.setClusterView(this);
+  }
+
+  /**
+   * Runtime state of every connector as its owner last reported it (heartbeat,
+   * at most one tick old): Map id → { status, lastActivity, stats, instance }.
+   */
+  async connectorRuntime() {
+    const { rows } = await this.pool.query(
+      `SELECT l.resource, l.owner, i.info
+         FROM cluster_leases l JOIN cluster_instances i ON i.id = l.owner
+        WHERE l.resource LIKE 'connector:%' AND l.expires_at > now()`
+    );
+    const runtime = new Map();
+    for (const row of rows) {
+      const id = row.resource.slice('connector:'.length);
+      const state = row.info?.connectorStatus?.[id];
+      runtime.set(id, { ...(state || { status: 'unknown' }), instance: row.owner });
+    }
+    return runtime;
+  }
+
+  /** Asks the instance running a connector to start, stop or restart it; returns that instance. */
+  async forwardConnectorOp(id, op) {
+    const { rows } = await this.pool.query(
+      'SELECT owner FROM cluster_leases WHERE resource = $1 AND expires_at > now()',
+      [`connector:${id}`]
+    );
+    if (!rows.length) {
+      const error = new Error(`Source '${id}' is not assigned to an instance yet: retry in a few seconds`);
+      error.status = 409;
+      throw error;
+    }
+    this.bus.control({ kind: 'connector-op', id, op, target: rows[0].owner });
+    return rows[0].owner;
+  }
+
+  async _onConnectorOp({ id, op }) {
+    if (!this.connectorEngine || !this.ownsConnector(id)) return;
+    const run = { start: 'startConnector', stop: 'stopConnector', restart: 'restartConnector' }[op];
+    if (!run) return;
+    try {
+      await this.connectorEngine[run](id);
+      logger.info(`Cluster: connector '${id}' ${op} requested by another instance`);
+    } catch (error) {
+      logger.error(`Cluster: ${op} of connector '${id}' failed: ${error.message}`);
+    }
+    // Report the new state right away instead of at the next tick
+    await this._heartbeat().catch(() => {});
   }
 
   /** ingestQueue: lets a released ingest partition finish its batch before the lease goes. */
@@ -68,6 +122,9 @@ class ClusterCoordinator {
       if (sub.partition === undefined) sub.partition = partitionOf(sub.id);
       return this.partitions.has(sub.partition) || this.draining.has(sub.partition);
     };
+    this.bus?.on('control', (msg) => {
+      if (msg.kind === 'connector-op' && msg.target === this.id) this._onConnectorOp(msg);
+    });
     await this.tick();
     this.timer = setInterval(() => this.tick(), TICK_MS);
     if (this.timer.unref) this.timer.unref();
@@ -109,6 +166,7 @@ class ClusterCoordinator {
     const info = {
       partitions: this.partitions.size,
       connectors: [...this.connectors],
+      connectorStatus: this._ownedConnectorStatus(),
       ...this.metrics()
     };
     await this.pool.query(
@@ -116,6 +174,15 @@ class ClusterCoordinator {
        ON CONFLICT (id) DO UPDATE SET heartbeat_at = now(), info = EXCLUDED.info`,
       [this.id, os.hostname(), this.startedAt, info]
     );
+  }
+
+  _ownedConnectorStatus() {
+    if (!this.connectorEngine) return {};
+    const all = this.connectorEngine.getConnectorStatus();
+    return Object.fromEntries([...this.connectors].filter(id => all[id]).map(id => {
+      const { status, lastActivity, stats } = all[id];
+      return [id, { status, lastActivity, stats }];
+    }));
   }
 
   async _liveInstances() {

@@ -59,9 +59,14 @@ class FakeEngine extends EventEmitter {
     this.mappingEngine = { mappingConfigs: new Map() };
   }
   setConnectorGate(gate) { this.gate = gate; }
+  setClusterView(view) { this.clusterView = view; }
+  getConnectorStatus() {
+    return Object.fromEntries([...this.connectors.keys()].map(id => [id, { status: this.running.has(id) ? 'running' : 'stopped', lastActivity: null, stats: {} }]));
+  }
   isConnectorActive(id) { return this.connectors.has(id) && (!this.gate || this.gate(id)); }
   async startConnector(id) { this.running.add(id); }
   async stopConnector(id) { this.running.delete(id); }
+  async restartConnector(id) { this.running.add(id); }
 }
 
 async function startInstance() {
@@ -125,6 +130,27 @@ async function main() {
       assert.strictEqual(Number(a.engine.isConnectorActive(id)) + Number(b.engine.isConnectorActive(id)), 1, id);
       assert.strictEqual(Number(a.engine.running.has(id)) + Number(b.engine.running.has(id)), 1, `${id} running`);
     }
+  });
+
+  await test('connector state from the owner, operations forwarded to it', async () => {
+    await waitFor(() => conns(a).size + conns(b).size === 3, 10000, 'connector leases');
+    // Heartbeats carry the owned connectors' state
+    await a.broker.cluster._heartbeat();
+    await b.broker.cluster._heartbeat();
+    const runtime = await a.broker.cluster.connectorRuntime();
+    for (const id of ['plc-a', 'plc-b', 'plc-c']) {
+      const owner = conns(a).has(id) ? a : b;
+      assert.strictEqual(runtime.get(id)?.instance, owner.broker.instanceId, id);
+      assert.strictEqual(runtime.get(id)?.status, 'running', id);
+    }
+    // A stop asked on the instance that does not run it reaches the owner
+    const id = [...conns(b)][0] || [...conns(a)][0];
+    const [owner, other] = conns(a).has(id) ? [a, b] : [b, a];
+    assert.strictEqual(await other.broker.cluster.forwardConnectorOp(id, 'stop'), owner.broker.instanceId);
+    await waitFor(() => !owner.engine.running.has(id), 5000, 'forwarded stop');
+    await waitFor(async () => (await other.broker.cluster.connectorRuntime()).get(id)?.status === 'stopped', 5000, 'reported stopped');
+    await other.broker.cluster.forwardConnectorOp(id, 'start');
+    await waitFor(() => owner.engine.running.has(id), 5000, 'forwarded start');
   });
 
   await test('every subscription is notified exactly once, whichever instance takes the write', async () => {

@@ -67,9 +67,11 @@ Le subscription HTTP e WebSocket non richiedono nessuno dei due. Una subscriptio
 | Cluster con Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 repliche, `UDC_REPLICAS` per cambiarle) |
 | Kubernetes | `helm install udc deploy/helm/udc` (vedi `values.yaml`: database e NATS inclusi oppure esterni, NATS e MQTT opzionali) |
 
-Lo stack avvia anche **universal-data-connector-ui-api** su `:9000`, il backend della UI orchestratore: registra questo UDC con `BROKER_SERVICE_KEY` (vedi il suo README).
+Lo stack avvia anche:
+- **universal-data-connector-ui-api** su `:9000`, il backend della UI orchestratore. Registra questo UDC con `BROKER_SERVICE_KEY` (vedi il suo README).
+- **La UI orchestratore** su **http://localhost:8080**. È una lavagna con le istanze UDC, le loro sorgenti e destinazioni; nginx inoltra `/api` a ui-api. Il login usa `UI_ADMIN_USER` / `UI_ADMIN_PASSWORD`.
 
-La UI è su **http://localhost:8080**: nginx inoltra `/api` e lo stream WebSocket al backend. L'API è anche su `:3000` in istanza singola. Il primo avvio crea il tenant `default` e il superadmin `BROKER_ADMIN_USER`; se `BROKER_ADMIN_PASSWORD` manca, la password viene generata e scritta nel log una volta sola.
+L'API dell'UDC (dispositivi, script, client MCP) è su **http://localhost:3000**. In cluster la pubblica il gateway `udc-gateway`, che bilancia le repliche. Il primo avvio crea il tenant `default` e il superadmin `BROKER_ADMIN_USER`; se `BROKER_ADMIN_PASSWORD` manca, la password viene generata e scritta nel log una volta sola.
 
 ## Modello entità
 
@@ -375,6 +377,10 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 
 **Configurazione dei connettori**
 - `sources.json` e `mapping.json` sono condivisi tramite il database (`system_config`). Ogni modifica fatta da `/system` e ogni salvataggio della discovery si propaga alle altre istanze. `BROKER_CONFIG_SYNC=false` lo disattiva.
+- La modifica viene condivisa prima della risposta. Le altre istanze la applicano subito dopo, in genere entro qualche centinaio di millisecondi.
+- Qualsiasi istanza risponde su tutti i connettori:
+  - `GET /system/sources` riporta lo stato di ogni connettore come l'ha visto l'istanza che lo esegue, all'ultimo heartbeat, e la indica in `runtime.instance`;
+  - start, stop e restart di un connettore che gira altrove vengono inoltrati a quell'istanza, con risposta `202` e `status: "forwarded"`.
 
 **Monitoraggio**
 - La pagina Amministrazione → Cluster mostra istanze, partizioni, connettori, ritardo dell'event loop (sopra 200 ms l'istanza è satura), tempo di apply dell'ingest e backlog delle code.

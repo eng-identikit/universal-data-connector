@@ -6,7 +6,49 @@ const { forCaller } = require('../secrets');
 const { parseLimit } = require('../params');
 
 // Get all sources
-router.get('/', (req, res) => {
+/**
+ * Connector state by id. In a cluster each connector runs on one instance:
+ * the ones running elsewhere are reported as their owner last saw them.
+ */
+async function clusterStatus(engine) {
+  const local = engine.getConnectorStatus() || {};
+  if (!engine.clusterView) return local;
+  let remote;
+  try {
+    remote = await engine.clusterView.connectorRuntime();
+  } catch (error) {
+    logger.warn(`Cluster connector state unavailable: ${error.message}`);
+    return local;
+  }
+  const merged = { ...local };
+  for (const id of Object.keys(local)) {
+    if (engine.canRun(id)) merged[id] = { ...local[id], instance: engine.clusterView.id };
+    else if (remote.has(id)) merged[id] = { ...local[id], ...remote.get(id) };
+  }
+  return merged;
+}
+
+/** start/stop/restart of a connector that runs on another cluster instance. */
+async function forward(res, engine, sourceId, op) {
+  if (!engine.clusterView) {
+    return res.status(409).json({ error: 'Conflict', message: `Source '${sourceId}' runs on another instance` });
+  }
+  try {
+    const instance = await engine.clusterView.forwardConnectorOp(sourceId, op);
+    return res.status(202).json({
+      timestamp: new Date().toISOString(),
+      sourceId,
+      action: op,
+      status: 'forwarded',
+      instance,
+      message: `Source '${sourceId}' runs on instance ${instance}: the ${op} was sent there`
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({ error: error.status === 409 ? 'Conflict' : 'Internal Server Error', message: error.message });
+  }
+}
+
+router.get('/', async (req, res) => {
   try {
     const connector = global.connector;
     const engine = connector?.getEngine();
@@ -19,7 +61,7 @@ router.get('/', (req, res) => {
     }
 
     const sources = configManager.getSources();
-    const connectorStatus = engine.getConnectorStatus() || {};
+    const connectorStatus = await clusterStatus(engine);
 
     const sourcesWithStatus = sources.map(source => {
       const status = connectorStatus[source.id];
@@ -28,6 +70,7 @@ router.get('/', (req, res) => {
         runtime: {
           status: status?.status || 'unknown',
           lastActivity: status?.lastActivity || null,
+          instance: status?.instance || null,
           stats: status?.stats || { dataPoints: 0, errors: 0, connections: 0 }
         }
       };
@@ -50,7 +93,7 @@ router.get('/', (req, res) => {
 });
 
 // Get specific source
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const sourceId = req.params.id;
     const source = configManager.getSourceById(sourceId);
@@ -67,7 +110,7 @@ router.get('/:id', (req, res) => {
 
     let runtimeStatus = null;
     if (engine) {
-      runtimeStatus = engine.getConnectorStatus(sourceId);
+      runtimeStatus = (await clusterStatus(engine))[sourceId] || null;
     }
 
     res.json({
@@ -159,10 +202,7 @@ router.post('/:id/start', async (req, res) => {
     }
 
     if (!engine.canRun(sourceId)) {
-      return res.status(409).json({
-        error: 'Conflict',
-        message: `Source '${sourceId}' runs on another cluster instance: start it there`
-      });
+      return forward(res, engine, sourceId, 'start');
     }
 
     await engine.startConnector(sourceId);
@@ -210,10 +250,7 @@ router.post('/:id/stop', async (req, res) => {
     }
 
     if (!engine.canRun(sourceId)) {
-      return res.status(409).json({
-        error: 'Conflict',
-        message: `Source '${sourceId}' runs on another cluster instance: stop it there`
-      });
+      return forward(res, engine, sourceId, 'stop');
     }
 
     await engine.stopConnector(sourceId);
@@ -261,10 +298,7 @@ router.post('/:id/restart', async (req, res) => {
     }
 
     if (!engine.canRun(sourceId)) {
-      return res.status(409).json({
-        error: 'Conflict',
-        message: `Source '${sourceId}' runs on another cluster instance: restart it there`
-      });
+      return forward(res, engine, sourceId, 'restart');
     }
 
     await engine.restartConnector(sourceId);

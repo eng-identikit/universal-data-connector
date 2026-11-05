@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.auth.adminUser | quote }}
             - name: BROKER_ADMIN_PASSWORD
               valueFrom: { secretKeyRef: { name: {{ include "udc.secretName" . }}, key: admin-password } }
+            - name: BROKER_SERVICE_KEY
+              valueFrom: { secretKeyRef: { name: {{ include "udc.secretName" . }}, key: service-key } }
             {{- if .Values.nats.enabled }}
             - name: NATS_URL
               value: {{ include "udc.natsUrl" . | quote }}
