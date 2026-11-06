@@ -440,6 +440,10 @@ const stats = engine.getStatistics();
 - [Storage Guide](./docs/Storage.md)
 - [Web UI](https://github.com/Engineering-Research-and-Development/universal-data-connector-ui): dashboard, real-time charts, history
 
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
 ---
 
 **Universal Data Connector v2.0** - Industry 5.0 Ready 🚀
