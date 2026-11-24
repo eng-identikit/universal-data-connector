@@ -123,6 +123,12 @@ class Broker {
         logger.warn('BROKER_CLUSTER=true ignored: clustering needs NATS_URL');
       }
     }
+    // A single instance whose config directory does not survive restarts (a Kubernetes pod
+    // with an emptyDir, a container without volumes) keeps its connector configuration in
+    // the database too. Opt-in: a local config/ directory is otherwise the source of truth.
+    if (!this.configSync && process.env.BROKER_CONFIG_SYNC === 'true') {
+      this.configSync = new ConfigSync({ pool: this.pool, bus: this.bus, instanceId: this.instanceId, transformers: this.services.transformers });
+    }
 
     // Committed entity writes fan out to every instance through the bus
     this.services.entities.on('entityChanged', (change) => this.bus.publish(change));
@@ -139,6 +145,7 @@ class Broker {
     this.lastError = null;
     this.retryTimer = null;
     this.stopped = false;
+    this.draining = false;
     this.router = this._buildRouter();
   }
 
@@ -237,6 +244,7 @@ class Broker {
   status() {
     return {
       ready: this.ready,
+      ...(this.draining && { draining: true }),
       instance: this.instanceId,
       database: this.dbReady,
       geo: this.services.entities.geoEnabled,
@@ -309,7 +317,8 @@ class Broker {
     const tenantRole = (role) => requireTenantRole(role, this.services);
     const deps = { services: this.services, authenticate: auth, tenantRole, engine: this.engine, worker: this.worker, broker: this };
 
-    router.get('/health', (req, res) => res.status(this.ready ? 200 : 503).json(this.status()));
+    // Readiness: 503 while starting and while draining before a shutdown (no new traffic)
+    router.get('/health', (req, res) => res.status(this.ready && !this.draining ? 200 : 503).json(this.status()));
     router.use((req, res, next) => next(this.ready ? undefined : unavailable('Broker is starting: database or messaging not ready')));
 
     router.use('/auth', authRoutes(deps));

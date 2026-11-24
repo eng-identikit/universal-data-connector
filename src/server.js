@@ -4,6 +4,7 @@ const helmet = require('helmet');
 require('dotenv').config();
 
 const logger = require('./utils/logger');
+const { seedConfigDirectory } = require('./config/seedConfig');
 const DataConnectorEngine = require('./core/DataConnectorEngine');
 const systemRoutes = require('./api');
 const mappingRoutes = require('./api/routes/mapping');
@@ -28,6 +29,9 @@ class UniversalDataConnector {
     this.engine = null;
     this.port = process.env.PORT || 3000;
     this.storageConfig = storageConfig;
+    // Before the broker (transformer library) and the engine read config/
+    const seeded = seedConfigDirectory();
+    if (seeded.length) logger.info(`Default configuration copied into config/: ${seeded.join(', ')}`);
     this.broker = new Broker();
   }
 
@@ -182,19 +186,45 @@ class UniversalDataConnector {
     }
   }
 
-  async stop() {
+  /**
+   * Graceful stop (SIGTERM from Kubernetes or Docker):
+   *   1. readiness answers 503 and, for UDC_SHUTDOWN_DELAY_MS, requests are still served
+   *      while load balancers and Service endpoints stop sending traffic here
+   *   2. no new connections; requests in progress get UDC_SHUTDOWN_REQUEST_TIMEOUT_MS
+   *   3. connectors stop, the broker flushes its queues and hands its leases over
+   * Safe to call more than once.
+   */
+  stop() {
+    if (!this.stopping) this.stopping = this._stop();
+    return this.stopping;
+  }
+
+  async _stop() {
     logger.info('Stopping Universal Data Connector...');
+    const delay = parseInt(process.env.UDC_SHUTDOWN_DELAY_MS || '0', 10);
+    const requestTimeout = parseInt(process.env.UDC_SHUTDOWN_REQUEST_TIMEOUT_MS || '5000', 10);
 
     try {
+      this.broker.draining = true;
+      if (delay > 0) {
+        logger.info(`Draining for ${delay} ms before closing the HTTP server`);
+        await sleep(delay);
+      }
+
+      if (this.server) {
+        const closed = new Promise(resolve => this.server.close(resolve));
+        this.server.closeIdleConnections?.();
+        // Realtime streams are long-lived: close them so clients reconnect elsewhere
+        this.broker.hub.close();
+        await Promise.race([closed, sleep(requestTimeout)]);
+      }
+
       if (this.engine) {
         await this.engine.stop();
       }
 
-      if (this.server) {
-        this.server.close();
-      }
-
       await this.broker.stop();
+      this.server?.closeAllConnections?.();
 
       logger.info('Universal Data Connector stopped successfully');
     } catch (error) {
@@ -204,22 +234,32 @@ class UniversalDataConnector {
   }
 }
 
-// Handle graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  if (global.connector) {
-    await global.connector.stop();
-  }
-  process.exit(0);
-});
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  if (global.connector) {
-    await global.connector.stop();
+// Handle graceful shutdown. A second Ctrl+C exits at once; a repeated SIGTERM is ignored
+// (the orchestrator sends SIGKILL when the grace period ends)
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) {
+    if (signal !== 'SIGINT') return logger.warn(`${signal} received again while stopping: ignored`);
+    logger.warn('SIGINT received again, exiting now');
+    process.exit(1);
   }
-  process.exit(0);
-});
+  shuttingDown = true;
+  logger.info(`${signal} received, shutting down gracefully`);
+  let code = 0;
+  try {
+    if (global.connector) await global.connector.stop();
+  } catch {
+    code = 1;
+  }
+  process.exit(code);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Start the connector if this file is run directly
 if (require.main === module) {

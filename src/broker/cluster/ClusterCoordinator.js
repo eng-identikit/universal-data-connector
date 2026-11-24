@@ -14,7 +14,9 @@ const PARTITIONS = 32;
  *
  *   sub:<0..31>        subscription partitions (hash of the subscription id):
  *                      the owner evaluates changes, throttles and periodic sends
- *   connector:<id>     each connector runs on exactly one instance
+ *   connector:<id>     each connector runs on exactly one instance; a source with
+ *                      placement: ['serial'] only on instances labelled 'serial'
+ *                      (UDC_INSTANCE_LABELS), balanced among them
  *   ingest:<0..15>     ingest queue partitions, applied by one instance at a time
  *
  * Each heartbeat carries the state of the connectors the instance runs, so any
@@ -44,6 +46,9 @@ class ClusterCoordinator {
     this.timer = null;
     this.ticking = false;
     this.startedAt = new Date();
+    // What this instance can reach (serial ports, a fieldbus segment, a site): UDC_INSTANCE_LABELS=serial,site-a
+    this.labels = parseLabels(process.env.UDC_INSTANCE_LABELS);
+    this.unplaced = new Set(); // placement groups already reported as having no instance
   }
 
   /** Subscription ownership by partition, consulted by the subscription engine. */
@@ -136,7 +141,8 @@ class ClusterCoordinator {
     this.ticking = true;
     try {
       await this._heartbeat();
-      const live = await this._liveInstances();
+      const instances = await this._liveInstances();
+      const live = Math.max(1, instances.length);
       await this._renew();
 
       const beforePartitions = new Set([...this.partitions, ...this.draining.keys()]);
@@ -151,8 +157,7 @@ class ClusterCoordinator {
 
       if (this.connectorEngine) {
         const before = new Set(this.connectors);
-        const ids = [...this.connectorEngine.connectors.keys()].map(id => `connector:${id}`);
-        await this._balance('connector:', ids, live, this.connectors);
+        await this._balanceConnectors(instances);
         await this._applyConnectors(before);
       }
     } catch (error) {
@@ -164,6 +169,7 @@ class ClusterCoordinator {
 
   async _heartbeat() {
     const info = {
+      labels: this.labels,
       partitions: this.partitions.size,
       connectors: [...this.connectors],
       connectorStatus: this._ownedConnectorStatus(),
@@ -185,12 +191,53 @@ class ClusterCoordinator {
     }));
   }
 
+  /** Live instances with their labels: [{ id, labels }]. */
   async _liveInstances() {
     const { rows } = await this.pool.query(
-      `SELECT id FROM cluster_instances WHERE heartbeat_at > now() - ($1 || ' milliseconds')::interval ORDER BY id`,
+      `SELECT id, info->'labels' AS labels FROM cluster_instances
+        WHERE heartbeat_at > now() - ($1 || ' milliseconds')::interval ORDER BY id`,
       [String(LEASE_MS)]
     );
-    return Math.max(1, rows.length);
+    return rows.map(r => ({ id: r.id, labels: Array.isArray(r.labels) ? r.labels : [] }));
+  }
+
+  /**
+   * Connectors are balanced per placement group: the fair share of a group is computed
+   * among the live instances having all its labels; the others never take it.
+   */
+  async _balanceConnectors(instances) {
+    const configured = this.connectorEngine.connectors;
+    const groups = new Map(); // 'label,label' → { placement, ids }
+    for (const [id, info] of configured) {
+      const placement = normalizePlacement(info.config?.placement);
+      const key = placement.join(',');
+      if (!groups.has(key)) groups.set(key, { placement, ids: [] });
+      groups.get(key).ids.push(id);
+    }
+
+    // Removed connectors, and connectors whose placement this instance no longer matches
+    const drop = [...this.connectors].filter(id => !configured.has(id)
+      || !hasLabels(this.labels, normalizePlacement(configured.get(id).config?.placement)));
+    if (drop.length) {
+      drop.forEach(id => this.connectors.delete(id));
+      await this.pool.query('DELETE FROM cluster_leases WHERE owner = $1 AND resource = ANY($2)', [this.id, drop.map(id => `connector:${id}`)]);
+    }
+
+    for (const [key, { placement, ids }] of groups) {
+      const eligible = instances.filter(i => hasLabels(i.labels, placement)).length;
+      if (!eligible) {
+        if (!this.unplaced.has(key)) {
+          this.unplaced.add(key);
+          logger.warn(`Cluster: no live instance has the labels [${key}] required by ${ids.map(id => `'${id}'`).join(', ')} (UDC_INSTANCE_LABELS)`);
+        }
+        continue;
+      }
+      this.unplaced.delete(key);
+      if (!hasLabels(this.labels, placement)) continue;
+      const owned = new Set(ids.filter(id => this.connectors.has(id)));
+      await this._balance('connector:', ids.map(id => `connector:${id}`), eligible, owned);
+      ids.forEach(id => (owned.has(id) ? this.connectors.add(id) : this.connectors.delete(id)));
+    }
   }
 
   /** Draining partitions end once another instance holds them, or after one lease period. */
@@ -338,6 +385,19 @@ function partitionOf(id) {
   return h % PARTITIONS;
 }
 
+/** UDC_INSTANCE_LABELS: comma or space separated. */
+function parseLabels(value) {
+  return normalizePlacement(String(value || '').split(/[s,]+/));
+}
+
+function normalizePlacement(labels) {
+  return Array.isArray(labels) ? [...new Set(labels.map(l => String(l).trim()).filter(Boolean))].sort() : [];
+}
+
+function hasLabels(instanceLabels, placement) {
+  return placement.every(l => instanceLabels.includes(l));
+}
+
 function sameSet(a, b) {
   return a.size === b.size && [...a].every(x => b.has(x));
 }
@@ -345,3 +405,5 @@ function sameSet(a, b) {
 module.exports = ClusterCoordinator;
 module.exports.partitionOf = partitionOf;
 module.exports.PARTITIONS = PARTITIONS;
+module.exports.parseLabels = parseLabels;
+module.exports.hasLabels = hasLabels;

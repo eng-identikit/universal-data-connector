@@ -11,7 +11,13 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-optional
 
 COPY src ./src
-COPY config ./config
+# Default configuration: copied into config/ at startup when missing there, so a volume
+# mounted on config/ (Kubernetes emptyDir, empty Docker volume) keeps transformers, DDS
+# example and storage defaults. Writable directories belong to the runtime user.
+COPY config ./config.defaults
+RUN mkdir -p config certificates logs \
+ && cp -R config.defaults/. config/ \
+ && chown -R node:node config certificates logs
 
 ENV NODE_ENV=production \
     PORT=3000

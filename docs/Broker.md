@@ -65,7 +65,7 @@ HTTP and WebSocket subscriptions need neither. A subscription that relies on a d
 |---|---|
 | Development, single instance | `cp .env.example .env` (set `BROKER_JWT_SECRET` and `BROKER_ADMIN_PASSWORD`), then `docker compose up -d --build` |
 | Cluster with Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 replicas; `UDC_REPLICAS` changes the count) |
-| Kubernetes | `helm install udc deploy/helm/udc` (see `values.yaml`: database and NATS bundled or external, NATS and MQTT optional) |
+| Kubernetes | `helm install udc deploy/helm/udc` (see `values.yaml` and the [Kubernetes](#kubernetes) section: one UDC on N replicas, one UI and one ui-api) |
 
 The stack also starts:
 - **universal-data-connector-ui-api** on `:9000`, the backend of the orchestrator UI. It registers this UDC with `BROKER_SERVICE_KEY` (see its README).
@@ -368,6 +368,11 @@ With `BROKER_CLUSTER=true` (and NATS), several instances share the work through 
 **Balancing**
 - Each instance holds a fair share of the resources: `ceil(resources / live instances)`.
 
+**Placement**
+- A source with `"placement": ["serial"]` runs only on instances started with all those labels (`UDC_INSTANCE_LABELS=serial`), e.g. the replica that has the serial port or sits on the fieldbus network. The fair share of such connectors is computed among those instances only.
+- If no live instance has the labels, the connector runs nowhere and every instance logs a warning. Without a cluster `placement` is ignored.
+- The UI sets it in the connector dialog; Administration → Cluster shows the labels of each instance.
+
 **Rebalancing**
 - When an instance joins or leaves cleanly, subscription partitions are handed over in "draining" mode: the instance giving them up keeps evaluating them until another one has taken them. The result is at most a few duplicates, never a gap, as the cluster test verifies.
 - Connectors are handed over directly, because they must never run on two instances at once.
@@ -385,6 +390,25 @@ With `BROKER_CLUSTER=true` (and NATS), several instances share the work through 
 **Monitoring**
 - Administration → Cluster shows instances, partitions, connectors, event-loop delay (above 200 ms an instance is saturated), ingest apply time and queue backlogs.
 
+## Kubernetes
+
+`deploy/helm/udc` installs **one UDC on N replicas** (`backend.replicas`), with **one UI and one ui-api**: the orchestrator sees all the replicas as a single UDC through the backend Service. Only the backend scales.
+
+**What a pod needs, and what the chart sets**
+- `config/` is an `emptyDir`: sources, mapping and transformers live in the database (`BROKER_CONFIG_SYNC=true`, also with a single replica without NATS). The image ships its defaults in `config.defaults/` and copies the missing ones at startup.
+- Read-only root filesystem, user 1000, no capabilities. Writable: `/app/config`, `/app/certificates`, `/tmp`.
+- Logs on stdout only (`LOG_FILE=false`).
+- `startupProbe` for slow first starts. On SIGTERM readiness goes to 503 and the pod keeps serving for `backend.shutdownDelaySeconds` (5 s), then closes, stops its connectors and hands its leases over.
+
+**OPC UA**
+- Without a shared identity every pod generates its own self-signed certificate at start, and a server with security would have to trust each one.
+- Shared identity: `npm run opcua:cert -- ./opcua --uri urn:udc:Universal-Data-Connector` (or `docker run --rm -v "$PWD/opcua:/out" udc/backend node src/tools/opcua-certificate.js /out`), then `kubectl create secret generic udc-opcua --from-file=./opcua/certificate.pem --from-file=./opcua/private_key.pem` and `backend.opcua.existingSecret=udc-opcua`. `backend.opcua.trustedSecret` adds server certificates to trust.
+
+**Edge pools: hardware and plant networks**
+- The pod network does not carry BACnet broadcast, DDS multicast discovery, Profinet DCP or EtherCAT frames, and a pod sees no serial port.
+- `backend.edgePools` adds replicas of the same UDC with `hostNetwork`, host devices (`devices: [/dev/ttyUSB0]`, with `privileged: true`) or capabilities (`[NET_RAW, NET_ADMIN]`), pinned to nodes with `nodeSelector`. Each pool has `labels`; sources with the matching `placement` run only there. Pools need NATS and are not behind the Service.
+- TCP protocols (Modbus TCP, S7, OPC UA, MQTT, HTTP, EtherNet/IP, FINS, MELSEC) work from any pod.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -397,7 +421,14 @@ With `BROKER_CLUSTER=true` (and NATS), several instances share the work through 
 | `NATS_URL` | — | Enables JetStream (durable queues) and clustering |
 | `BROKER_CLUSTER` | `false` | Splits the work between instances |
 | `BROKER_CLUSTER_TICK_MS` | 5000 | Lease renewal interval |
-| `BROKER_CONFIG_SYNC` | `true` (in a cluster) | Shares `sources.json` and `mapping.json` |
+| `BROKER_CONFIG_SYNC` | `true` in a cluster, `false` otherwise | Keeps `sources.json`, `mapping.json` and `transformers.json` in the database. `true` on a single instance makes them survive an ephemeral `config/` (pod, container without volumes) |
+| `UDC_INSTANCE_LABELS` | — | Labels of this instance for connector `placement` (comma separated) |
+| `UDC_SHUTDOWN_DELAY_MS` / `UDC_SHUTDOWN_REQUEST_TIMEOUT_MS` | 0 / 5000 | On SIGTERM: time spent still serving with readiness at 503, then the wait for requests in progress |
+| `UDC_CONFIG_DEFAULTS_DIR` | `./config.defaults` | Defaults copied into `config/` when missing there (the image ships them) |
+| `UDC_CERTIFICATES_DIR` | `./certificates` | OPC UA PKI (generated identity, trusted and rejected server certificates) |
+| `OPCUA_CERTIFICATE_FILE` / `OPCUA_PRIVATE_KEY_FILE` | — | OPC UA client identity provided from outside, the same on every replica |
+| `OPCUA_APPLICATION_URI` | `urn:<hostname>:Universal-Data-Connector` | Must match the URI in the certificate; set it where the host name changes (pods) |
+| `LOG_FILE` / `LOG_DIR` / `LOG_COLOR` | `true` / `./logs` / on a terminal | `LOG_FILE=false` logs to stdout only |
 | `BROKER_INGEST_FLUSH_MS` | 200 | Coalescing window for connector updates |
 | `BROKER_INGEST_PARTITIONS` | 16 | Ingest partitions (same value on every instance) |
 | `BROKER_HISTORY` / `BROKER_HISTORY_RETENTION` | `on` / — | Attribute history and its retention |

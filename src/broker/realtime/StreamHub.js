@@ -216,7 +216,11 @@ class StreamHub {
   close() {
     clearInterval(this.pingTimer);
     clearInterval(this.revalidateTimer);
-    if (this.wss) this.wss.close();
+    if (this.wss) {
+      // Clients reconnect to another instance (1001 = going away)
+      for (const ws of this.wss.clients) ws.close(1001, 'Server shutting down');
+      this.wss.close();
+    }
   }
 }
 

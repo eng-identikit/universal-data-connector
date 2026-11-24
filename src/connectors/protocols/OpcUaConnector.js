@@ -52,9 +52,16 @@ class OpcUaConnector extends BaseConnector {
 
     const { config } = this.config;
 
-    // Setup certificate manager
-    const certificateFolder = path.join(process.cwd(), 'certificates');
-    const certificateFile = path.join(certificateFolder, 'server_certificate.pem');
+    // Client identity and PKI (trusted/rejected server certificates). In containers:
+    //   UDC_CERTIFICATES_DIR      writable PKI folder (default ./certificates)
+    //   OPCUA_CERTIFICATE_FILE    client certificate provided from outside (e.g. a Kubernetes
+    //   OPCUA_PRIVATE_KEY_FILE    Secret): every replica presents the same identity, so a
+    //                             server trusts it once whichever replica runs the connector
+    //   OPCUA_APPLICATION_URI     must match the URI in the certificate
+    const certificateFolder = process.env.UDC_CERTIFICATES_DIR || path.join(process.cwd(), 'certificates');
+    const providedCertificate = process.env.OPCUA_CERTIFICATE_FILE;
+    const certificateFile = providedCertificate || path.join(certificateFolder, 'server_certificate.pem');
+    const applicationUri = OpcUaConnector.applicationUri();
 
     const certificateManager = new OPCUACertificateManager({
       rootFolder: certificateFolder,
@@ -64,20 +71,23 @@ class OpcUaConnector extends BaseConnector {
     try {
       await certificateManager.initialize();
     } catch (error) {
-      logger.warn(`Failed to initialize certificate manager: ${error.message}`);
+      logger.warn(`Failed to initialize certificate manager in ${certificateFolder}: ${error.message}`);
     }
 
-    const privateKeyFile = certificateManager.privateKey;
+    const privateKeyFile = process.env.OPCUA_PRIVATE_KEY_FILE || certificateManager.privateKey;
+    if (providedCertificate && !process.env.OPCUA_PRIVATE_KEY_FILE) {
+      logger.warn('OPCUA_CERTIFICATE_FILE is set without OPCUA_PRIVATE_KEY_FILE: the generated private key will not match it');
+    }
 
-    // Create certificate if it doesn't exist
-    if (!fs.existsSync(certificateFile)) {
+    // Create certificate if it doesn't exist (never over a provided one)
+    if (!providedCertificate && !fs.existsSync(certificateFile)) {
       try {
         await certificateManager.createSelfSignedCertificate({
           subject: '/CN=localhost/O=Engineering Ingegneria Informatica S.p.A./L=Palermo',
           startDate: new Date(),
           dns: [],
           validity: 365 * 5,
-          applicationUri: `urn:${os.hostname()}:Universal-Data-Connector`,
+          applicationUri,
           outputFile: certificateFile
         });
         logger.info(`Created self-signed certificate at ${certificateFile}`);
@@ -92,6 +102,7 @@ class OpcUaConnector extends BaseConnector {
     // Create OPC UA client with proper options from OPCUABinding example
     this.client = OPCUAClient.create({
       applicationName: "Universal Data Connector",
+      applicationUri,
       endpointMustExist: false,
       securityMode: this.getSecurityMode(config.securityMode),
       securityPolicy: this.getSecurityPolicy(config.securityPolicy),
@@ -820,5 +831,12 @@ class OpcUaConnector extends BaseConnector {
     };
   }
 }
+
+/**
+ * Application URI of the client: must match the one in its certificate. Fixed through
+ * OPCUA_APPLICATION_URI when the host name changes (containers, Kubernetes pods).
+ */
+OpcUaConnector.applicationUri = () =>
+  process.env.OPCUA_APPLICATION_URI || `urn:${os.hostname()}:Universal-Data-Connector`;
 
 module.exports = OpcUaConnector;

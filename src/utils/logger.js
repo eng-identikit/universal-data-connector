@@ -1,12 +1,12 @@
 const winston = require('winston');
 const path = require('path');
-
-// Create logs directory if it doesn't exist
 const fs = require('fs');
-const logsDir = path.join(process.cwd(), 'logs');
-if (!fs.existsSync(logsDir)) {
-  fs.mkdirSync(logsDir, { recursive: true });
-}
+
+// LOG_FILE=false: console only (containers, where stdout is collected by the runtime)
+const logToFile = process.env.LOG_FILE !== 'false';
+// Colors only on an interactive terminal unless LOG_COLOR says otherwise
+const colorize = process.env.LOG_COLOR ? process.env.LOG_COLOR === 'true' : !!process.stdout.isTTY;
+const logsDir = process.env.LOG_DIR || path.join(process.cwd(), 'logs');
 
 const logFormat = winston.format.combine(
   winston.format.timestamp({
@@ -28,33 +28,40 @@ const logFormat = winston.format.combine(
   })
 );
 
+const transports = [
+  new winston.transports.Console({
+    format: colorize ? winston.format.combine(winston.format.colorize(), logFormat) : logFormat
+  })
+];
+
+if (logToFile) {
+  try {
+    fs.mkdirSync(logsDir, { recursive: true });
+    transports.push(
+      // All logs
+      new winston.transports.File({
+        filename: path.join(logsDir, 'connector.log'),
+        maxsize: 10 * 1024 * 1024, // 10MB
+        maxFiles: 5
+      }),
+      // Errors only
+      new winston.transports.File({
+        filename: path.join(logsDir, 'error.log'),
+        level: 'error',
+        maxsize: 10 * 1024 * 1024, // 10MB
+        maxFiles: 5
+      })
+    );
+  } catch (error) {
+    // Read-only filesystem or no permission: keep logging to the console
+    console.error(`Log files disabled (${logsDir}: ${error.message})`);
+  }
+}
+
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: logFormat,
-  transports: [
-    // Console transport
-    new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        logFormat
-      )
-    }),
-    
-    // File transport for all logs
-    new winston.transports.File({
-      filename: path.join(logsDir, 'connector.log'),
-      maxsize: 10 * 1024 * 1024, // 10MB
-      maxFiles: 5
-    }),
-    
-    // File transport for errors only
-    new winston.transports.File({
-      filename: path.join(logsDir, 'error.log'),
-      level: 'error',
-      maxsize: 10 * 1024 * 1024, // 10MB
-      maxFiles: 5
-    })
-  ]
+  transports
 });
 
 // Add metadata helper

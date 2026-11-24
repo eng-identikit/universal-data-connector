@@ -6,7 +6,10 @@ metadata:
   labels: {{- include "udc.labels" . | nindent 4 }}
     app.kubernetes.io/component: ui-api
 spec:
-  replicas: {{ .Values.uiApi.replicas }}
+  # Always one instance (catalog, board, UI users); never two at once, not even during an upgrade
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels: {{- include "udc.selector" . | nindent 6 }}
       app.kubernetes.io/component: ui-api

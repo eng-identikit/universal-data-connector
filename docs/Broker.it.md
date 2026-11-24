@@ -65,7 +65,7 @@ Le subscription HTTP e WebSocket non richiedono nessuno dei due. Una subscriptio
 |---|---|
 | Sviluppo, istanza singola | `cp .env.example .env` (imposta `BROKER_JWT_SECRET` e `BROKER_ADMIN_PASSWORD`), poi `docker compose up -d --build` |
 | Cluster con Compose | `docker compose -f docker-compose.yml -f docker-compose.cluster.yml up -d --build` (3 repliche, `UDC_REPLICAS` per cambiarle) |
-| Kubernetes | `helm install udc deploy/helm/udc` (vedi `values.yaml`: database e NATS inclusi oppure esterni, NATS e MQTT opzionali) |
+| Kubernetes | `helm install udc deploy/helm/udc` (vedi `values.yaml` e la sezione [Kubernetes](#kubernetes): un UDC su N repliche, una UI e una ui-api) |
 
 Lo stack avvia anche:
 - **universal-data-connector-ui-api** su `:9000`, il backend della UI orchestratore. Registra questo UDC con `BROKER_SERVICE_KEY` (vedi il suo README).
@@ -368,6 +368,11 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 **Bilanciamento**
 - Ogni istanza tiene una quota equa di risorse: `ceil(risorse / istanze vive)`.
 
+**Placement**
+- Una sorgente con `"placement": ["serial"]` gira solo sulle istanze avviate con tutte quelle etichette (`UDC_INSTANCE_LABELS=serial`), ad esempio la replica che ha la porta seriale o che sta sulla rete del fieldbus. La quota equa di questi connettori si calcola solo fra quelle istanze.
+- Se nessuna istanza viva ha le etichette, il connettore non gira da nessuna parte e ogni istanza lo segnala nel log. Senza cluster `placement` viene ignorato.
+- La UI lo imposta nel dialog del connettore; Amministrazione → Cluster mostra le etichette di ogni istanza.
+
 **Ribilanciamento**
 - Quando un'istanza entra o esce in modo pulito, le partizioni delle subscription vengono cedute in "draining": chi le cede continua a valutarle finché un'altra istanza non le ha prese. Il risultato è al più qualche duplicato, mai un buco, come verificato dal test del cluster.
 - I connettori invece passano di mano direttamente, perché non devono mai girare su due istanze insieme.
@@ -385,6 +390,25 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 **Monitoraggio**
 - La pagina Amministrazione → Cluster mostra istanze, partizioni, connettori, ritardo dell'event loop (sopra 200 ms l'istanza è satura), tempo di apply dell'ingest e backlog delle code.
 
+## Kubernetes
+
+`deploy/helm/udc` installa **un UDC su N repliche** (`backend.replicas`), con **una UI e una ui-api**: l'orchestratore vede tutte le repliche come un solo UDC tramite il Service del backend. Scala solo il backend.
+
+**Cosa serve a un pod, e cosa imposta il chart**
+- `config/` è un `emptyDir`: sorgenti, mapping e transformer stanno nel database (`BROKER_CONFIG_SYNC=true`, anche con una sola replica senza NATS). L'immagine contiene i file predefiniti in `config.defaults/` e all'avvio copia quelli mancanti.
+- Filesystem root in sola lettura, utente 1000, nessuna capability. Scrivibili: `/app/config`, `/app/certificates`, `/tmp`.
+- Log solo su stdout (`LOG_FILE=false`).
+- `startupProbe` per i primi avvii lenti. Al SIGTERM la readiness passa a 503 e il pod continua a servire per `backend.shutdownDelaySeconds` (5 s), poi chiude, ferma i connettori e cede i lease.
+
+**OPC UA**
+- Senza un'identità condivisa ogni pod genera all'avvio il proprio certificato autofirmato, e un server con sicurezza dovrebbe dare fiducia a ognuno.
+- Identità condivisa: `npm run opcua:cert -- ./opcua --uri urn:udc:Universal-Data-Connector` (oppure `docker run --rm -v "$PWD/opcua:/out" udc/backend node src/tools/opcua-certificate.js /out`), poi `kubectl create secret generic udc-opcua --from-file=./opcua/certificate.pem --from-file=./opcua/private_key.pem` e `backend.opcua.existingSecret=udc-opcua`. `backend.opcua.trustedSecret` aggiunge i certificati dei server da considerare fidati.
+
+**Edge pool: hardware e reti di impianto**
+- La rete dei pod non trasporta il broadcast BACnet, il multicast della discovery DDS, Profinet DCP né i frame EtherCAT, e un pod non vede porte seriali.
+- `backend.edgePools` aggiunge repliche dello stesso UDC con `hostNetwork`, dispositivi dell'host (`devices: [/dev/ttyUSB0]`, con `privileged: true`) o capability (`[NET_RAW, NET_ADMIN]`), vincolate ai nodi con `nodeSelector`. Ogni pool ha le sue `labels`; le sorgenti con il `placement` corrispondente girano solo lì. I pool richiedono NATS e non stanno dietro al Service.
+- I protocolli TCP (Modbus TCP, S7, OPC UA, MQTT, HTTP, EtherNet/IP, FINS, MELSEC) funzionano da qualsiasi pod.
+
 ## Configurazione
 
 | Variabile | Predefinito | Descrizione |
@@ -397,7 +421,14 @@ Con `BROKER_CLUSTER=true` (e NATS) più istanze condividono il lavoro attraverso
 | `NATS_URL` | — | Abilita JetStream (code durevoli) e il cluster |
 | `BROKER_CLUSTER` | `false` | Distribuzione del lavoro fra istanze |
 | `BROKER_CLUSTER_TICK_MS` | 5000 | Rinnovo dei lease |
-| `BROKER_CONFIG_SYNC` | `true` (nel cluster) | Condivisione di `sources.json` e `mapping.json` |
+| `BROKER_CONFIG_SYNC` | `true` nel cluster, `false` altrimenti | Tiene `sources.json`, `mapping.json` e `transformers.json` nel database. `true` su un'istanza singola li fa sopravvivere a una `config/` effimera (pod, container senza volumi) |
+| `UDC_INSTANCE_LABELS` | — | Etichette di questa istanza per il `placement` dei connettori (separate da virgola) |
+| `UDC_SHUTDOWN_DELAY_MS` / `UDC_SHUTDOWN_REQUEST_TIMEOUT_MS` | 0 / 5000 | Al SIGTERM: tempo in cui si continua a servire con readiness a 503, poi attesa delle richieste in corso |
+| `UDC_CONFIG_DEFAULTS_DIR` | `./config.defaults` | File predefiniti copiati in `config/` se mancano (l'immagine li contiene) |
+| `UDC_CERTIFICATES_DIR` | `./certificates` | PKI OPC UA (identità generata, certificati dei server fidati e rifiutati) |
+| `OPCUA_CERTIFICATE_FILE` / `OPCUA_PRIVATE_KEY_FILE` | — | Identità del client OPC UA fornita dall'esterno, uguale su tutte le repliche |
+| `OPCUA_APPLICATION_URI` | `urn:<hostname>:Universal-Data-Connector` | Deve coincidere con l'URI nel certificato; va fissata dove il nome host cambia (pod) |
+| `LOG_FILE` / `LOG_DIR` / `LOG_COLOR` | `true` / `./logs` / su terminale | `LOG_FILE=false` scrive solo su stdout |
 | `BROKER_INGEST_FLUSH_MS` | 200 | Coalescing degli update dei connettori |
 | `BROKER_INGEST_PARTITIONS` | 16 | Partizioni dell'ingest (uguale su tutte le istanze) |
 | `BROKER_HISTORY` / `BROKER_HISTORY_RETENTION` | `on` / — | Storico degli attributi e sua retention |

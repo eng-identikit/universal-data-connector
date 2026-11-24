@@ -18,6 +18,9 @@ const sourceConfigSchema = Joi.object({
       tenant: Joi.string().pattern(/^[a-z0-9][a-z0-9_-]{0,62}$/).default('default'),
       // Optional prefix for the entity ids of this source's devices
       entityIdPrefix: Joi.string().max(64).allow('').optional(),
+      // Cluster: run only on instances having all these labels (UDC_INSTANCE_LABELS),
+      // e.g. the replicas with the serial port or on the fieldbus network
+      placement: Joi.array().items(Joi.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/)).max(8).unique().optional(),
       config: Joi.object().required(),
       tags: Joi.array().items(
         Joi.object({

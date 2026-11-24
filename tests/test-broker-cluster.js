@@ -173,6 +173,26 @@ async function main() {
     assert.ok(subs.every(id => perSub[id] === 2), JSON.stringify(perSub));
   });
 
+  await test('placement: a connector runs only on instances with its labels', async () => {
+    const setPlacement = (id, placement) => [a, b].forEach(inst => { inst.engine.connectors.get(id).config.placement = placement; });
+    // b reaches the serial port (UDC_INSTANCE_LABELS=serial)
+    b.broker.cluster.labels = ['serial'];
+    await b.broker.cluster._heartbeat();
+    setPlacement('plc-c', ['serial']);
+    await waitFor(() => b.engine.running.has('plc-c') && !a.engine.running.has('plc-c')
+      && conns(a).size + conns(b).size === 3, 10000, 'plc-c on the labelled instance');
+    // A label nobody has: the connector runs nowhere
+    setPlacement('plc-b', ['nowhere']);
+    await waitFor(() => !a.engine.running.has('plc-b') && !b.engine.running.has('plc-b'), 10000, 'plc-b released');
+    await sleep(1200);
+    assert.ok(!conns(a).has('plc-b') && !conns(b).has('plc-b'), 'plc-b leased without a matching instance');
+    assert.ok(b.engine.running.has('plc-c') && !a.engine.running.has('plc-c'), 'plc-c moved off the labelled instance');
+    // Placement removed: back to the normal split
+    setPlacement('plc-b', undefined);
+    setPlacement('plc-c', undefined);
+    await waitFor(() => conns(a).size + conns(b).size === 3 && conns(a).size >= 1 && conns(b).size >= 1, 10000, 'normal split');
+  });
+
   await test('cluster status lists both instances and leases', async () => {
     const s = await call(a, 'GET', '/cluster');
     assert.strictEqual(s.status, 200);

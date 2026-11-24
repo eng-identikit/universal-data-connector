@@ -1,6 +1,16 @@
 Universal Data Connector {{ .Chart.AppVersion }} installed as "{{ .Release.Name }}".
 
-Backend replicas: {{ .Values.backend.replicas }} (cluster mode: connectors and subscriptions are split through leases)
+One UDC on {{ .Values.backend.replicas }} replica(s){{ if .Values.nats.enabled }} (connectors and subscriptions split through leases){{ end }}
+{{- range .Values.backend.edgePools }}
+  + edge pool "{{ .name }}": {{ .replicas | default 1 }} replica(s), labels [{{ join ", " (.labels | default list) }}]{{ if .hostNetwork }}, host network{{ end }}{{ if .devices }}, devices {{ join " " .devices }}{{ end }}
+{{- end }}
+{{- if .Values.ui.enabled }}
+UI and ui-api: one instance each, they see all the replicas as a single UDC
+{{- end }}
+{{- if not .Values.backend.opcua.existingSecret }}
+OPC UA: every pod generates its own client certificate. For servers with security set
+backend.opcua.existingSecret (see values.yaml) so all replicas share one identity.
+{{- end }}
 Database: {{ include "udc.dbHost" . }}   NATS: {{ if .Values.nats.enabled }}{{ include "udc.natsUrl" . }}{{ else }}disabled (in-memory queues){{ end }}   MQTT: {{ include "udc.mqttUrl" . | default "none" }}   Sessions: {{ if .Values.redis.enabled }}Redis{{ else }}PostgreSQL{{ end }}
 
 UDC admin login: {{ .Values.auth.adminUser }}

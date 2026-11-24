@@ -8,7 +8,9 @@ backend:
     repository: udc/backend
     tag: "2.0.0"
     pullPolicy: IfNotPresent
-  # Replicas share the work through leases (connectors, subscription partitions)
+  # The only component with N replicas: one UDC split across them through leases
+  # (connectors, subscription partitions, ingest). The UI and the ui-api always run as one
+  # instance and see all the replicas as a single UDC through the backend Service.
   replicas: 2
   logLevel: info
   # Raw connector data buffer: memory (entity history lives in the broker database)
@@ -25,13 +27,77 @@ backend:
   tolerations: []
   affinity: {}
 
+  # Graceful stop: after SIGTERM the pod keeps serving for shutdownDelaySeconds (readiness
+  # already 503) while the Service stops sending it traffic, then finishes the requests in
+  # progress, stops its connectors and hands its leases over
+  shutdownDelaySeconds: 5
+  terminationGracePeriodSeconds: 30
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000          # "node" in the image
+    runAsGroup: 1000
+    fsGroup: 1000
+    seccompProfile: { type: RuntimeDefault }
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true   # writable: /app/config, /app/certificates, /tmp (emptyDir)
+    capabilities: { drop: [ALL] }
+
+  # Labels of these replicas (UDC_INSTANCE_LABELS). A source with placement: [<label>, ...]
+  # runs only on replicas having all those labels (see edgePools)
+  labels: []
+
+  # Network and hardware access of the main pool; usually left off here and set on an
+  # edge pool instead (see below)
+  hostNetwork: false
+  privileged: false
+  capabilities: []
+  devices: []
+
+  # OPC UA client identity. Without existingSecret every pod generates its own self-signed
+  # certificate at start: OPC UA servers with security would have to trust each new one.
+  # Shared identity (same certificate on every replica, trusted once):
+  #   node src/tools/opcua-certificate.js ./opcua --uri urn:udc:Universal-Data-Connector
+  #   kubectl create secret generic udc-opcua --from-file=./opcua/certificate.pem --from-file=./opcua/private_key.pem
+  opcua:
+    applicationUri: "urn:udc:Universal-Data-Connector"
+    # Secret with certificate.pem and private_key.pem
+    existingSecret: ""
+    # Secret with the OPC UA server certificates to trust (any file names, PEM or DER)
+    trustedSecret: ""
+
+  # Edge pools: replicas that reach what a normal pod cannot (serial ports, a fieldbus
+  # segment, BACnet broadcast, DDS multicast, Profinet DCP / EtherCAT raw frames).
+  # They join the same cluster (NATS required), are not behind the Service, and run only
+  # the sources whose placement they match. Image, resources, logLevel, extraEnv and the
+  # security contexts are inherited from backend unless set here.
+  #   hostNetwork  the node's network: broadcast and multicast reach the plant network
+  #                (port 3000 is then taken on the node: one replica per node)
+  #   devices      host character devices mounted at the same path (serial ports); they
+  #                need privileged: true or a device plugin
+  #   privileged / capabilities (e.g. [NET_RAW, NET_ADMIN] for raw frames) run as root
+  edgePools: []
+  #  - name: serial
+  #    replicas: 1
+  #    labels: [serial]
+  #    nodeSelector: { udc.io/serial: "true" }
+  #    devices: [/dev/ttyUSB0]
+  #    privileged: true
+  #  - name: fieldbus
+  #    replicas: 1
+  #    labels: [fieldbus]
+  #    hostNetwork: true
+  #    capabilities: [NET_RAW, NET_ADMIN]
+  #    nodeSelector: { udc.io/plant-network: "true" }
+
 ui:
   enabled: true
   image:
     repository: udc/ui
     tag: "2.0.0"
     pullPolicy: IfNotPresent
-  replicas: 1
+  # Always one instance
   resources:
     requests: { cpu: 50m, memory: 32Mi }
     limits: { memory: 128Mi }
@@ -42,7 +108,7 @@ uiApi:
     repository: udc/ui-api
     tag: "1.0.0"
     pullPolicy: IfNotPresent
-  replicas: 1
+  # Always one instance (Recreate on upgrades)
   # Its own database on the same PostgreSQL (created on first start)
   dbName: udc_ui
   adminUser: admin
